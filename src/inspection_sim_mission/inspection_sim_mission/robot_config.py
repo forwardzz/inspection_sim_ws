@@ -49,6 +49,16 @@ IMU_X = "-0.125"
 IMU_Y = "-0.031"
 IMU_Z = "0.040"
 
+LEFT_PWM_PIN = 18
+LEFT_IN1_PIN = 22
+LEFT_IN2_PIN = 27
+RIGHT_PWM_PIN = 23
+RIGHT_IN1_PIN = 25
+RIGHT_IN2_PIN = 24
+
+WHEEL_RADIUS_M = 0.025
+TRACK_WIDTH_M = 0.156
+
 INSPECTION_REGIONS_PATH = os.path.join(
     os.path.expanduser("~/inspection_sim_ws"),
     "maps",

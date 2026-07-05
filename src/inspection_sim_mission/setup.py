@@ -22,6 +22,7 @@ setup(
         "console_scripts": [
             "mission_manager = inspection_sim_mission.mission_manager:main",
             "sim_imu_adapter = inspection_sim_mission.sim_imu_adapter:main",
+            "tracked_motor_driver = inspection_sim_mission.tracked_motor_driver:main",
         ],
     },
 )

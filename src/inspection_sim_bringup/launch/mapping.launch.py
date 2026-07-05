@@ -140,6 +140,14 @@ def generate_launch_description():
         ),
 
         Node(
+            package="inspection_sim_mission",
+            executable="tracked_motor_driver",
+            name="tracked_motor_driver",
+            output="screen",
+            condition=hardware_condition,
+        ),
+
+        Node(
             package="rf2o_laser_odometry",
             executable="rf2o_laser_odometry_node",
             name="rf2o_laser_odometry",
