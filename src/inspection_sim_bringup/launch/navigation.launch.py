@@ -1,7 +1,8 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import EnvironmentVariable, LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import Command, EnvironmentVariable, LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
@@ -18,6 +19,8 @@ def generate_launch_description():
     serial_port = LaunchConfiguration("serial_port")
     serial_baudrate = LaunchConfiguration("serial_baudrate")
     imu_serial_port = LaunchConfiguration("imu_serial_port")
+    sim_condition = IfCondition(PythonExpression(["'", sensor_source, "' == 'sim'"]))
+    hardware_condition = IfCondition(PythonExpression(["'", sensor_source, "' == 'hardware'"]))
 
     sim_launch = PathJoinSubstitution(
         [pkg_share, "launch", "sim.launch.py"]
@@ -30,6 +33,9 @@ def generate_launch_description():
     )
     ekf_config = PathJoinSubstitution(
         [pkg_share, "config", "ekf.yaml"]
+    )
+    robot_xacro = PathJoinSubstitution(
+        [pkg_share, "urdf", "inspection_tracked_robot.urdf.xacro"]
     )
     rviz_config = PathJoinSubstitution(
         [pkg_share, "rviz", "inspection_sim.rviz"]
@@ -46,6 +52,7 @@ def generate_launch_description():
     default_regions = PathJoinSubstitution(
         [EnvironmentVariable("HOME"), "inspection_sim_ws", "maps", "inspection_regions.yaml"]
     )
+    robot_description = Command(["xacro ", robot_xacro])
 
     lifecycle_nodes = [
         "map_server",
@@ -125,6 +132,48 @@ def generate_launch_description():
                 "serial_baudrate": serial_baudrate,
                 "imu_serial_port": imu_serial_port,
             }.items(),
+            condition=sim_condition,
+        ),
+
+        Node(
+            package="robot_state_publisher",
+            executable="robot_state_publisher",
+            name="robot_state_publisher",
+            output="screen",
+            parameters=[{
+                "robot_description": robot_description,
+                "use_sim_time": use_sim_time,
+            }],
+            condition=hardware_condition,
+        ),
+
+        Node(
+            package="sllidar_ros2",
+            executable="sllidar_node",
+            name="sllidar_node",
+            output="screen",
+            parameters=[{
+                "channel_type": "serial",
+                "serial_port": serial_port,
+                "serial_baudrate": serial_baudrate,
+                "frame_id": "laser",
+                "inverted": False,
+                "angle_compensate": True,
+            }],
+            respawn=True,
+            respawn_delay=5.0,
+            condition=hardware_condition,
+        ),
+
+        Node(
+            package="imu_ros2_device",
+            executable="ybimu_driver",
+            name="ybimu_node",
+            output="screen",
+            parameters=[{
+                "serial_port": imu_serial_port,
+            }],
+            condition=hardware_condition,
         ),
 
         Node(
@@ -150,7 +199,7 @@ def generate_launch_description():
             executable="ekf_node",
             name="ekf_filter_node",
             output="screen",
-            parameters=[ekf_config],
+            parameters=[ekf_config, {"use_sim_time": use_sim_time}],
             remappings=[("odometry/filtered", "/odom")],
         ),
 
@@ -170,7 +219,7 @@ def generate_launch_description():
             executable="map_server",
             name="map_server",
             output="screen",
-            parameters=[nav2_params, {"yaml_filename": map_file}],
+            parameters=[nav2_params, {"yaml_filename": map_file}, {"use_sim_time": use_sim_time}],
         ),
 
         Node(
@@ -178,7 +227,7 @@ def generate_launch_description():
             executable="amcl",
             name="amcl",
             output="screen",
-            parameters=[nav2_params],
+            parameters=[nav2_params, {"use_sim_time": use_sim_time}],
         ),
 
         Node(
@@ -186,7 +235,7 @@ def generate_launch_description():
             executable="planner_server",
             name="planner_server",
             output="screen",
-            parameters=[nav2_params],
+            parameters=[nav2_params, {"use_sim_time": use_sim_time}],
         ),
 
         Node(
@@ -194,7 +243,7 @@ def generate_launch_description():
             executable="controller_server",
             name="controller_server",
             output="screen",
-            parameters=[nav2_params],
+            parameters=[nav2_params, {"use_sim_time": use_sim_time}],
             remappings=[("/cmd_vel", "/cmd_vel_nav")],
         ),
 
@@ -205,6 +254,7 @@ def generate_launch_description():
             output="screen",
             parameters=[
                 nav2_params,
+                {"use_sim_time": use_sim_time},
                 {"default_nav_to_pose_bt_xml": nav_to_pose_bt},
                 {"default_nav_through_poses_bt_xml": nav_through_poses_bt},
             ],
@@ -215,7 +265,7 @@ def generate_launch_description():
             executable="behavior_server",
             name="behavior_server",
             output="screen",
-            parameters=[nav2_params],
+            parameters=[nav2_params, {"use_sim_time": use_sim_time}],
         ),
 
         Node(
@@ -223,7 +273,7 @@ def generate_launch_description():
             executable="smoother_server",
             name="smoother_server",
             output="screen",
-            parameters=[nav2_params],
+            parameters=[nav2_params, {"use_sim_time": use_sim_time}],
         ),
 
         Node(
@@ -231,7 +281,7 @@ def generate_launch_description():
             executable="velocity_smoother",
             name="velocity_smoother",
             output="screen",
-            parameters=[nav2_params],
+            parameters=[nav2_params, {"use_sim_time": use_sim_time}],
             remappings=[
                 ("/cmd_vel", "/cmd_vel_nav"),
                 ("/cmd_vel_smoothed", "/cmd_vel"),
@@ -247,7 +297,7 @@ def generate_launch_description():
                     name="lifecycle_manager_navigation",
                     output="screen",
                     parameters=[{
-                        "use_sim_time": False,
+                        "use_sim_time": use_sim_time,
                         "autostart": True,
                         "bond_timeout": 6.0,
                         "node_names": lifecycle_nodes,
