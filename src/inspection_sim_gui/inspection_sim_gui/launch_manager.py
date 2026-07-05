@@ -1,0 +1,176 @@
+import os
+import shlex
+import signal
+
+from PyQt5.QtCore import QObject, QProcess, pyqtSignal
+
+from .config import DEFAULT_ROS_SETUP_PATH, DEFAULT_WORKSPACE_PATH
+
+
+class LaunchManager(QObject):
+    log_line = pyqtSignal(str)
+    state_changed = pyqtSignal(str)
+
+    def __init__(self, workspace_path=DEFAULT_WORKSPACE_PATH, ros_setup_path=DEFAULT_ROS_SETUP_PATH):
+        super().__init__()
+        self.workspace_path = workspace_path
+        self.ros_setup_path = ros_setup_path
+        self.active_process = None
+        self.active_name = "idle"
+        self.oneshot_processes = []
+
+    def update_paths(self, workspace_path, ros_setup_path):
+        self.workspace_path = workspace_path
+        self.ros_setup_path = ros_setup_path
+
+    def start_sim(
+        self,
+        use_rviz=False,
+        headless=False,
+        sensor_source="sim",
+        lidar_serial_port="",
+        lidar_baudrate="115200",
+        imu_serial_port="",
+    ):
+        command = (
+            "ros2 launch inspection_sim_bringup sim.launch.py "
+            f"use_rviz:={str(use_rviz).lower()} "
+            f"headless:={str(headless).lower()} "
+            f"sensor_source:={shlex.quote(sensor_source)} "
+            f"serial_port:={shlex.quote(lidar_serial_port)} "
+            f"serial_baudrate:={shlex.quote(lidar_baudrate)} "
+            f"imu_serial_port:={shlex.quote(imu_serial_port)}"
+        )
+        return self.start("sim", command)
+
+    def start_mapping(
+        self,
+        use_rviz=True,
+        headless=False,
+        sensor_source="sim",
+        lidar_serial_port="",
+        lidar_baudrate="115200",
+        imu_serial_port="",
+    ):
+        command = (
+            "ros2 launch inspection_sim_bringup mapping.launch.py "
+            f"use_rviz:={str(use_rviz).lower()} "
+            f"headless:={str(headless).lower()} "
+            f"sensor_source:={shlex.quote(sensor_source)} "
+            f"serial_port:={shlex.quote(lidar_serial_port)} "
+            f"serial_baudrate:={shlex.quote(lidar_baudrate)} "
+            f"imu_serial_port:={shlex.quote(imu_serial_port)}"
+        )
+        return self.start("mapping", command)
+
+    def start_navigation(
+        self,
+        map_path,
+        use_rviz=True,
+        headless=False,
+        sensor_source="sim",
+        lidar_serial_port="",
+        lidar_baudrate="115200",
+        imu_serial_port="",
+    ):
+        command = (
+            "ros2 launch inspection_sim_bringup navigation.launch.py "
+            f"map:={shlex.quote(map_path)} "
+            f"use_rviz:={str(use_rviz).lower()} "
+            f"headless:={str(headless).lower()} "
+            f"sensor_source:={shlex.quote(sensor_source)} "
+            f"serial_port:={shlex.quote(lidar_serial_port)} "
+            f"serial_baudrate:={shlex.quote(lidar_baudrate)} "
+            f"imu_serial_port:={shlex.quote(imu_serial_port)}"
+        )
+        return self.start("navigation", command)
+
+    def save_map(self, map_path):
+        prefix = os.path.splitext(map_path)[0]
+        maps_dir = os.path.dirname(map_path) or os.path.join(self.workspace_path, "maps")
+        command = (
+            f"mkdir -p {shlex.quote(maps_dir)} && "
+            f"ros2 run nav2_map_server map_saver_cli -f {shlex.quote(prefix)} -t /map"
+        )
+        self.run_once("save_map", command)
+
+    def start(self, name, command):
+        if self.active_process is not None and self.active_process.state() != QProcess.NotRunning:
+            self.log_line.emit(f"[WARN] Stop {self.active_name} before starting {name}.")
+            return False
+
+        proc = self._make_process(name, track_active=True)
+        self.active_process = proc
+        self.active_name = name
+        self.state_changed.emit(name)
+        self.log_line.emit(f"[RUN] {name}: {command}")
+        proc.start("setsid", ["bash", "-lc", self._wrap_command(command)])
+        return True
+
+    def run_once(self, name, command):
+        proc = self._make_process(name, track_active=False)
+        self.oneshot_processes.append(proc)
+        self.log_line.emit(f"[RUN] {name}: {command}")
+        proc.start("setsid", ["bash", "-lc", self._wrap_command(command)])
+
+    def stop(self):
+        if self.active_process is None or self.active_process.state() == QProcess.NotRunning:
+            self.log_line.emit("[STOP] no active launch")
+            self.active_name = "idle"
+            self.state_changed.emit("idle")
+            return
+
+        pid = int(self.active_process.processId())
+        self.log_line.emit(f"[STOP] {self.active_name}")
+        try:
+            os.killpg(pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass
+        self.active_process.waitForFinished(2500)
+        if self.active_process.state() != QProcess.NotRunning:
+            try:
+                os.killpg(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            self.active_process.waitForFinished(2500)
+        if self.active_process.state() != QProcess.NotRunning:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.active_process = None
+        self.active_name = "idle"
+        self.state_changed.emit("idle")
+
+    def is_running(self):
+        return self.active_process is not None and self.active_process.state() != QProcess.NotRunning
+
+    def _wrap_command(self, command):
+        setup_path = os.path.join(self.workspace_path, "install", "setup.bash")
+        return (
+            f"source {shlex.quote(self.ros_setup_path)} && "
+            f"source {shlex.quote(setup_path)} && "
+            f"cd {shlex.quote(self.workspace_path)} && "
+            f"{command}"
+        )
+
+    def _make_process(self, name, track_active):
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(lambda p=proc: self._read_output(p))
+        proc.finished.connect(lambda code, status, p=proc, n=name, t=track_active: self._finished(p, n, t, code))
+        return proc
+
+    def _read_output(self, proc):
+        data = bytes(proc.readAllStandardOutput()).decode(errors="replace")
+        for line in data.splitlines():
+            self.log_line.emit(line)
+
+    def _finished(self, proc, name, track_active, code):
+        self.log_line.emit(f"[EXIT] {name} -> {code}")
+        if track_active and proc is self.active_process:
+            self.active_process = None
+            self.active_name = "idle"
+            self.state_changed.emit("idle")
+        if proc in self.oneshot_processes:
+            self.oneshot_processes.remove(proc)
