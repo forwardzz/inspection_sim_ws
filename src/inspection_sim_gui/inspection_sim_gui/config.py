@@ -21,6 +21,9 @@ TOPIC_CLICKED_POINT = "/clicked_point"
 TOPIC_MISSION_GOAL_POSE = "/mission_goal_pose"
 TOPIC_MISSION_PREVIEW_PATH = "/mission_preview_path"
 TOPIC_MISSION_POINTS_MARKERS = "/mission_points_markers"
+TOPIC_THERMAL_FRAME = "/thermal_frame"
+TOPIC_GAS_DATA = "/gas_data"
+TOPIC_ROBOT_SAFETY_STATUS = "/robot_safety_status"
 
 ACTION_NAVIGATE_TO_POSE = "/navigate_to_pose"
 
@@ -31,6 +34,8 @@ SERVICE_SET_REGION_MODE = "/set_region_mode"
 SERVICE_CLEAR_INSPECTION_REGIONS = "/clear_inspection_regions"
 SERVICE_SAVE_INSPECTION_REGIONS = "/save_inspection_regions"
 SERVICE_LOAD_INSPECTION_REGIONS = "/load_inspection_regions"
+SERVICE_RESET_SAFETY_MONITOR = "/reset_safety_monitor"
+SERVICE_ABORT_MISSION = "/abort_mission"
 
 MAX_LINEAR_SPEED_MPS = 0.18
 MAX_ANGULAR_SPEED_RADPS = 0.55

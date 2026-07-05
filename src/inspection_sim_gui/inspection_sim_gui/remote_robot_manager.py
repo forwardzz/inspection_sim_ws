@@ -93,11 +93,51 @@ class RemoteRobotManager(QObject):
 
     def build_workspace(self):
         command = "colcon build"
-        self.run_remote_once("remote_build", self._workspace_command(command))
+        self.run_remote_once("remote_build", self._workspace_command(command, source_install=False))
 
     def show_navigation_args(self):
         command = "ros2 launch inspection_sim_bringup navigation.launch.py --show-args"
         self.run_remote_once("navigation_args", self._workspace_command(command))
+
+    def list_maps(self):
+        maps_dir = os.path.join(self.workspace, "maps")
+        command = (
+            f"printf '[MAP] maps_dir=%s\\n' {shlex.quote(maps_dir)}; "
+            f"find {shlex.quote(maps_dir)} -maxdepth 1 -type f -name '*.yaml' -print 2>/dev/null | sort"
+        )
+        self.run_remote_once("list_maps", self._workspace_command(command))
+
+    def save_map(self, map_path):
+        prefix = os.path.splitext(map_path)[0]
+        maps_dir = os.path.dirname(map_path) or os.path.join(self.workspace, "maps")
+        command = (
+            f"mkdir -p {shlex.quote(maps_dir)} && "
+            f"ros2 run nav2_map_server map_saver_cli -f {shlex.quote(prefix)}"
+        )
+        self.run_remote_once("save_map", self._workspace_command(command))
+
+    def start_thermal(self):
+        command = (
+            "if ros2 pkg prefix inspection_sim_bringup >/dev/null 2>&1 "
+            "&& [ -f \"$(ros2 pkg prefix inspection_sim_bringup)/share/inspection_sim_bringup/launch/sensor_monitor.launch.py\" ]; then "
+            "ros2 launch inspection_sim_bringup sensor_monitor.launch.py; "
+            "elif ros2 pkg prefix mapping_bringup >/dev/null 2>&1; then "
+            "ros2 launch mapping_bringup sensor_monitor.launch.py; "
+            "else "
+            "echo '[WARN] sensor_monitor.launch.py is not available in this workspace'; "
+            "exit 2; "
+            "fi"
+        )
+        self.start_launch("thermal", command, start_local_rviz=False)
+
+    def stop_thermal(self):
+        script = """
+pkill -TERM -f sensor_monitor.launch.py || true
+pkill -TERM -f thermal_camera_node || true
+pkill -TERM -f gas_sensor_node || true
+echo '[REMOTE] thermal/gas monitor stop requested'
+"""
+        self.run_remote_once("stop_thermal", script)
 
     def check_topics(self):
         command = (
@@ -114,6 +154,10 @@ class RemoteRobotManager(QObject):
             "\"{linear: {x: 0.0}, angular: {z: 0.0}}\""
         )
         self.run_remote_once("cmd_vel_stop", self._workspace_command(command))
+
+    def abort_mission(self):
+        command = "ros2 service call /abort_mission std_srvs/srv/Trigger {}"
+        self.run_remote_once("abort_mission", self._workspace_command(command))
 
     def status(self):
         script = f"""
@@ -281,14 +325,15 @@ fi
                 if proc.state() != QProcess.NotRunning:
                     proc.kill()
 
-    def _workspace_command(self, command):
+    def _workspace_command(self, command, source_install=True):
         setup_path = os.path.join(self.workspace, "install", "setup.bash")
+        setup_install = f"source {shlex.quote(setup_path)} && " if source_install else ""
         return (
             f"cd {shlex.quote(self.workspace)} && "
             f"export ROS_DOMAIN_ID={shlex.quote(self.ros_domain_id)} && "
             f"export ROS_LOCALHOST_ONLY={shlex.quote(self.ros_localhost_only)} && "
             f"source {shlex.quote(self.ros_setup)} && "
-            f"source {shlex.quote(setup_path)} && "
+            f"{setup_install}"
             f"{command}"
         )
 
