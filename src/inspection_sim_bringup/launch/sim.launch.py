@@ -15,10 +15,6 @@ def generate_launch_description():
     headless = LaunchConfiguration("headless")
     world_name = LaunchConfiguration("world_name")
     rviz_config = LaunchConfiguration("rviz_config")
-    sensor_source = LaunchConfiguration("sensor_source")
-    serial_port = LaunchConfiguration("serial_port")
-    serial_baudrate = LaunchConfiguration("serial_baudrate")
-    imu_serial_port = LaunchConfiguration("imu_serial_port")
 
     default_world = PathJoinSubstitution(
         [pkg_share, "worlds", "inspection_world.sdf"]
@@ -68,27 +64,6 @@ def generate_launch_description():
             "rviz_config",
             default_value=default_rviz_config,
             description="RViz config file",
-        ),
-        DeclareLaunchArgument(
-            "sensor_source",
-            default_value="sim",
-            description="Use sim Gazebo sensors or hardware serial sensors",
-            choices=["sim", "hardware"],
-        ),
-        DeclareLaunchArgument(
-            "serial_port",
-            default_value="/dev/serial/by-path/platform-xhci-hcd.0-usb-0:2:1.0-port0",
-            description="SLLIDAR serial port when sensor_source:=hardware",
-        ),
-        DeclareLaunchArgument(
-            "serial_baudrate",
-            default_value="115200",
-            description="SLLIDAR serial baudrate when sensor_source:=hardware",
-        ),
-        DeclareLaunchArgument(
-            "imu_serial_port",
-            default_value="/dev/ttyAMA0",
-            description="YB IMU serial port when sensor_source:=hardware",
         ),
 
         IncludeLaunchDescription(
@@ -158,7 +133,6 @@ def generate_launch_description():
                 "/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan",
                 "/sim/imu/data_raw@sensor_msgs/msg/Imu[gz.msgs.IMU",
             ],
-            condition=IfCondition(PythonExpression(["'", sensor_source, "' == 'sim'"])),
         ),
 
         Node(
@@ -174,36 +148,6 @@ def generate_launch_description():
                 "angular_velocity_z_sign": 1.0,
                 "orientation_z_sign": 1.0,
             }],
-            condition=IfCondition(PythonExpression(["'", sensor_source, "' == 'sim'"])),
-        ),
-
-        Node(
-            package="sllidar_ros2",
-            executable="sllidar_node",
-            name="sllidar_node",
-            output="screen",
-            parameters=[{
-                "channel_type": "serial",
-                "serial_port": serial_port,
-                "serial_baudrate": serial_baudrate,
-                "frame_id": "laser",
-                "inverted": False,
-                "angle_compensate": True,
-            }],
-            respawn=True,
-            respawn_delay=5.0,
-            condition=IfCondition(PythonExpression(["'", sensor_source, "' == 'hardware'"])),
-        ),
-
-        Node(
-            package="imu_ros2_device",
-            executable="ybimu_driver",
-            name="ybimu_node",
-            output="screen",
-            parameters=[{
-                "serial_port": imu_serial_port,
-            }],
-            condition=IfCondition(PythonExpression(["'", sensor_source, "' == 'hardware'"])),
         ),
 
         Node(

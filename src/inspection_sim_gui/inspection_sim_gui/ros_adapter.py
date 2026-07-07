@@ -17,10 +17,8 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 from sensor_msgs.msg import Imu, LaserScan
-from std_msgs.msg import Float32MultiArray
 from std_srvs.srv import SetBool, Trigger
 
-from robot_monitor_interfaces.msg import GasData, RobotSafetyStatus
 from robot_monitor_interfaces.srv import Localize, StartNavigation
 
 from .config import (
@@ -30,22 +28,18 @@ from .config import (
     SERVICE_CLEAR_RVIZ_POINTS,
     SERVICE_LOAD_INSPECTION_REGIONS,
     SERVICE_LOCALIZE_ROBOT,
-    SERVICE_RESET_SAFETY_MONITOR,
     SERVICE_SAVE_INSPECTION_REGIONS,
     SERVICE_SET_REGION_MODE,
     SERVICE_START_NAVIGATION,
     TOPIC_AMCL_POSE,
     TOPIC_CMD_VEL,
-    TOPIC_GAS_DATA,
     TOPIC_GOAL_POSE,
     TOPIC_IMU_RAW,
     TOPIC_INITIAL_POSE,
     TOPIC_LASER_ODOM,
     TOPIC_MAP,
     TOPIC_ODOM,
-    TOPIC_ROBOT_SAFETY_STATUS,
     TOPIC_SCAN,
-    TOPIC_THERMAL_FRAME,
 )
 
 
@@ -106,9 +100,6 @@ class RosAdapter:
         self.load_inspection_regions_client = self.node.create_client(
             Trigger, SERVICE_LOAD_INSPECTION_REGIONS
         )
-        self.reset_safety_client = self.node.create_client(
-            Trigger, SERVICE_RESET_SAFETY_MONITOR
-        )
         self.abort_mission_client = self.node.create_client(
             Trigger, SERVICE_ABORT_MISSION
         )
@@ -120,15 +111,6 @@ class RosAdapter:
         self.node.create_subscription(OccupancyGrid, TOPIC_MAP, self._map_cb, map_qos)
         self.node.create_subscription(
             PoseWithCovarianceStamped, TOPIC_AMCL_POSE, self._amcl_cb, 10
-        )
-        self.node.create_subscription(
-            Float32MultiArray, TOPIC_THERMAL_FRAME, self._thermal_cb, 10
-        )
-        self.node.create_subscription(
-            GasData, TOPIC_GAS_DATA, self._gas_cb, 10
-        )
-        self.node.create_subscription(
-            RobotSafetyStatus, TOPIC_ROBOT_SAFETY_STATUS, self._safety_cb, map_qos
         )
 
         self.nav_client = ActionClient(self.node, NavigateToPose, ACTION_NAVIGATE_TO_POSE)
@@ -159,27 +141,6 @@ class RosAdapter:
             "started": now,
             "nav_status": "idle",
             "nav_distance_remaining": None,
-            "last_thermal": 0.0,
-            "thermal_width": 32,
-            "thermal_height": 24,
-            "thermal_min": 0.0,
-            "thermal_max": 0.0,
-            "thermal_avg": 0.0,
-            "last_gas": 0.0,
-            "gas_h2": 0.0,
-            "gas_co": 0.0,
-            "gas_voc": 0.0,
-            "gas_smoke": 0.0,
-            "last_safety": 0.0,
-            "safety_level": "WAITING",
-            "safety_code": "INIT",
-            "safety_message": "No safety data",
-            "safety_mission_active": False,
-            "safety_voltage_available": False,
-            "safety_measured_voltage_v": float("nan"),
-            "safety_undervoltage_now": False,
-            "safety_undervoltage_seen": False,
-            "safety_throttled_flags": 0,
         }
 
         self.spin_thread = threading.Thread(target=self.executor.spin, daemon=True)
@@ -324,42 +285,6 @@ class RosAdapter:
             self.data["amcl_y"] = float(msg.pose.pose.position.y)
             self.data["amcl_yaw"] = quaternion_to_yaw(q)
             self.data["last_amcl"] = time.monotonic()
-
-    def _thermal_cb(self, msg):
-        if not msg.data:
-            return
-        dims = msg.layout.dim
-        height = int(dims[0].size) if len(dims) >= 1 and dims[0].size > 0 else 24
-        width = int(dims[1].size) if len(dims) >= 2 and dims[1].size > 0 else 32
-        values = [float(value) for value in msg.data]
-        with self._lock:
-            self.data["thermal_width"] = width
-            self.data["thermal_height"] = height
-            self.data["thermal_min"] = min(values)
-            self.data["thermal_max"] = max(values)
-            self.data["thermal_avg"] = sum(values) / len(values)
-            self.data["last_thermal"] = time.monotonic()
-
-    def _gas_cb(self, msg):
-        with self._lock:
-            self.data["gas_h2"] = float(msg.hydrogen_concentration)
-            self.data["gas_co"] = float(msg.co_concentration)
-            self.data["gas_voc"] = float(msg.voc_concentration)
-            self.data["gas_smoke"] = float(msg.smoke_concentration)
-            self.data["last_gas"] = time.monotonic()
-
-    def _safety_cb(self, msg):
-        with self._lock:
-            self.data["safety_level"] = msg.level or "WAITING"
-            self.data["safety_code"] = msg.code or "UNKNOWN"
-            self.data["safety_message"] = msg.message or "No details"
-            self.data["safety_mission_active"] = bool(msg.mission_active)
-            self.data["safety_voltage_available"] = bool(msg.voltage_available)
-            self.data["safety_measured_voltage_v"] = float(msg.measured_voltage_v)
-            self.data["safety_undervoltage_now"] = bool(msg.undervoltage_now)
-            self.data["safety_undervoltage_seen"] = bool(msg.undervoltage_seen)
-            self.data["safety_throttled_flags"] = int(msg.throttled_flags)
-            self.data["last_safety"] = time.monotonic()
 
     def _nav_feedback_cb(self, feedback_msg):
         feedback = feedback_msg.feedback

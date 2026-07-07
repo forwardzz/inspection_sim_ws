@@ -27,19 +27,11 @@ class LaunchManager(QObject):
         self,
         use_rviz=False,
         headless=False,
-        sensor_source="sim",
-        lidar_serial_port="",
-        lidar_baudrate="115200",
-        imu_serial_port="",
     ):
         command = (
             "ros2 launch inspection_sim_bringup sim.launch.py "
             f"use_rviz:={str(use_rviz).lower()} "
-            f"headless:={str(headless).lower()} "
-            f"sensor_source:={shlex.quote(sensor_source)} "
-            f"serial_port:={shlex.quote(lidar_serial_port)} "
-            f"serial_baudrate:={shlex.quote(lidar_baudrate)} "
-            f"imu_serial_port:={shlex.quote(imu_serial_port)}"
+            f"headless:={str(headless).lower()}"
         )
         return self.start("sim", command)
 
@@ -47,19 +39,11 @@ class LaunchManager(QObject):
         self,
         use_rviz=True,
         headless=False,
-        sensor_source="sim",
-        lidar_serial_port="",
-        lidar_baudrate="115200",
-        imu_serial_port="",
     ):
         command = (
             "ros2 launch inspection_sim_bringup mapping.launch.py "
             f"use_rviz:={str(use_rviz).lower()} "
-            f"headless:={str(headless).lower()} "
-            f"sensor_source:={shlex.quote(sensor_source)} "
-            f"serial_port:={shlex.quote(lidar_serial_port)} "
-            f"serial_baudrate:={shlex.quote(lidar_baudrate)} "
-            f"imu_serial_port:={shlex.quote(imu_serial_port)}"
+            f"headless:={str(headless).lower()}"
         )
         return self.start("mapping", command)
 
@@ -68,20 +52,12 @@ class LaunchManager(QObject):
         map_path,
         use_rviz=True,
         headless=False,
-        sensor_source="sim",
-        lidar_serial_port="",
-        lidar_baudrate="115200",
-        imu_serial_port="",
     ):
         command = (
             "ros2 launch inspection_sim_bringup navigation.launch.py "
             f"map:={shlex.quote(map_path)} "
             f"use_rviz:={str(use_rviz).lower()} "
-            f"headless:={str(headless).lower()} "
-            f"sensor_source:={shlex.quote(sensor_source)} "
-            f"serial_port:={shlex.quote(lidar_serial_port)} "
-            f"serial_baudrate:={shlex.quote(lidar_baudrate)} "
-            f"imu_serial_port:={shlex.quote(imu_serial_port)}"
+            f"headless:={str(headless).lower()}"
         )
         return self.start("navigation", command)
 

@@ -34,9 +34,6 @@ from robot_monitor_interfaces.srv import Localize, StartNavigation
 
 from .config import (
     DEFAULT_ANGULAR_SPEED_RADPS,
-    DEFAULT_IMU_SERIAL_PORT,
-    DEFAULT_LIDAR_BAUDRATE,
-    DEFAULT_LIDAR_SERIAL_PORT,
     DEFAULT_LINEAR_SPEED_MPS,
     DEFAULT_MAP_PATH,
     DEFAULT_ROS_SETUP_PATH,
@@ -188,21 +185,6 @@ class MainWindow(QMainWindow):
         self.use_rviz_check.setChecked(self.settings.value("use_rviz", "true") == "true")
         self.headless_check = QCheckBox("Gazebo 无界面")
         self.headless_check.setChecked(self.settings.value("headless", "false") == "true")
-        self.sensor_source_combo = QComboBox()
-        self.sensor_source_combo.addItem("仿真传感器", "sim")
-        self.sensor_source_combo.addItem("硬件串口", "hardware")
-        sensor_source = self.settings.value("sensor_source", "sim")
-        sensor_index = self.sensor_source_combo.findData(sensor_source)
-        self.sensor_source_combo.setCurrentIndex(max(sensor_index, 0))
-        self.lidar_port_edit = QLineEdit(
-            self.settings.value("lidar_serial_port", DEFAULT_LIDAR_SERIAL_PORT)
-        )
-        self.lidar_baudrate_edit = QLineEdit(
-            self.settings.value("lidar_baudrate", DEFAULT_LIDAR_BAUDRATE)
-        )
-        self.imu_port_edit = QLineEdit(
-            self.settings.value("imu_serial_port", DEFAULT_IMU_SERIAL_PORT)
-        )
 
         self.linear_spin = self._double_spin(0.0, MAX_LINEAR_SPEED_MPS, DEFAULT_LINEAR_SPEED_MPS, 0.01)
         self.angular_spin = self._double_spin(0.0, MAX_ANGULAR_SPEED_RADPS, DEFAULT_ANGULAR_SPEED_RADPS, 0.01)
@@ -309,18 +291,8 @@ class MainWindow(QMainWindow):
         browse_map.clicked.connect(self._browse_map)
         layout.addWidget(browse_map, 2, 4)
 
-        layout.addWidget(QLabel("传感器来源"), 3, 0)
-        layout.addWidget(self.sensor_source_combo, 3, 1)
-        layout.addWidget(self.use_rviz_check, 3, 2)
-        layout.addWidget(self.headless_check, 3, 3)
-
-        layout.addWidget(QLabel("雷达串口"), 4, 0)
-        layout.addWidget(self.lidar_port_edit, 4, 1, 1, 2)
-        layout.addWidget(QLabel("波特率"), 4, 3)
-        layout.addWidget(self.lidar_baudrate_edit, 4, 4)
-
-        layout.addWidget(QLabel("IMU 串口"), 5, 0)
-        layout.addWidget(self.imu_port_edit, 5, 1, 1, 4)
+        layout.addWidget(self.use_rviz_check, 3, 1)
+        layout.addWidget(self.headless_check, 3, 2)
 
         buttons = QHBoxLayout()
         for text, handler in [
@@ -333,7 +305,7 @@ class MainWindow(QMainWindow):
             button = QPushButton(text)
             button.clicked.connect(handler)
             buttons.addWidget(button)
-        layout.addLayout(buttons, 6, 0, 1, 5)
+        layout.addLayout(buttons, 4, 0, 1, 5)
         return group
 
     def _build_pose_group(self):
@@ -559,28 +531,12 @@ class MainWindow(QMainWindow):
         self.settings.setValue("map_path", map_path)
         self.settings.setValue("use_rviz", "true" if self.use_rviz_check.isChecked() else "false")
         self.settings.setValue("headless", "true" if self.headless_check.isChecked() else "false")
-        self.settings.setValue("sensor_source", self._sensor_source())
-        self.settings.setValue("lidar_serial_port", self.lidar_port_edit.text().strip())
-        self.settings.setValue("lidar_baudrate", self.lidar_baudrate_edit.text().strip())
-        self.settings.setValue("imu_serial_port", self.imu_port_edit.text().strip())
-
-    def _sensor_args(self):
-        return {
-            "sensor_source": self._sensor_source(),
-            "lidar_serial_port": self.lidar_port_edit.text().strip() or DEFAULT_LIDAR_SERIAL_PORT,
-            "lidar_baudrate": self.lidar_baudrate_edit.text().strip() or DEFAULT_LIDAR_BAUDRATE,
-            "imu_serial_port": self.imu_port_edit.text().strip() or DEFAULT_IMU_SERIAL_PORT,
-        }
-
-    def _sensor_source(self):
-        return self.sensor_source_combo.currentData() or "sim"
 
     def start_sim(self):
         self._apply_launch_paths()
         self.launch_manager.start_sim(
             self.use_rviz_check.isChecked(),
             self.headless_check.isChecked(),
-            **self._sensor_args(),
         )
 
     def start_mapping(self):
@@ -588,7 +544,6 @@ class MainWindow(QMainWindow):
         self.launch_manager.start_mapping(
             self.use_rviz_check.isChecked(),
             self.headless_check.isChecked(),
-            **self._sensor_args(),
         )
 
     def start_navigation(self):
@@ -602,7 +557,6 @@ class MainWindow(QMainWindow):
             map_path,
             self.use_rviz_check.isChecked(),
             self.headless_check.isChecked(),
-            **self._sensor_args(),
         )
 
     def save_map(self):

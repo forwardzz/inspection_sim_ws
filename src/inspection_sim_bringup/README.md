@@ -1,7 +1,8 @@
 # Inspection Simulation Bringup
 
 This workspace is a standalone ROS 2 Jazzy simulation for the tracked inspection robot.
-Gazebo publishes only `/scan`, `/imu/data_raw`, `/clock`, and accepts `/cmd_vel`.
+Gazebo publishes `/scan`, `/sim/imu/data_raw`, `/clock`, and accepts `/cmd_vel`.
+`sim_imu_adapter` republishes the Gazebo IMU data as `/imu/data_raw`.
 The ROS odometry chain is `rf2o_laser_odometry -> robot_localization EKF -> /odom`.
 
 ## Build

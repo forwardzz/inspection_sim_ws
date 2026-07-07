@@ -4,9 +4,6 @@ import os
 DEFAULT_WORKSPACE_PATH = os.path.expanduser("~/inspection_sim_ws")
 DEFAULT_ROS_SETUP_PATH = "/opt/ros/jazzy/setup.bash"
 DEFAULT_MAP_PATH = os.path.join(DEFAULT_WORKSPACE_PATH, "maps", "inspection_map.yaml")
-DEFAULT_LIDAR_SERIAL_PORT = "/dev/serial/by-path/platform-xhci-hcd.0-usb-0:2:1.0-port0"
-DEFAULT_LIDAR_BAUDRATE = "115200"
-DEFAULT_IMU_SERIAL_PORT = "/dev/ttyAMA0"
 
 TOPIC_CMD_VEL = "/cmd_vel"
 TOPIC_INITIAL_POSE = "/initialpose"
@@ -21,9 +18,6 @@ TOPIC_CLICKED_POINT = "/clicked_point"
 TOPIC_MISSION_GOAL_POSE = "/mission_goal_pose"
 TOPIC_MISSION_PREVIEW_PATH = "/mission_preview_path"
 TOPIC_MISSION_POINTS_MARKERS = "/mission_points_markers"
-TOPIC_THERMAL_FRAME = "/thermal_frame"
-TOPIC_GAS_DATA = "/gas_data"
-TOPIC_ROBOT_SAFETY_STATUS = "/robot_safety_status"
 
 ACTION_NAVIGATE_TO_POSE = "/navigate_to_pose"
 
@@ -34,7 +28,6 @@ SERVICE_SET_REGION_MODE = "/set_region_mode"
 SERVICE_CLEAR_INSPECTION_REGIONS = "/clear_inspection_regions"
 SERVICE_SAVE_INSPECTION_REGIONS = "/save_inspection_regions"
 SERVICE_LOAD_INSPECTION_REGIONS = "/load_inspection_regions"
-SERVICE_RESET_SAFETY_MONITOR = "/reset_safety_monitor"
 SERVICE_ABORT_MISSION = "/abort_mission"
 
 MAX_LINEAR_SPEED_MPS = 0.18

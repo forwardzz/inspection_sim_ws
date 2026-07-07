@@ -2,11 +2,14 @@
 
 ## Repo overview
 
-ROS 2 Jazzy simulation workspace (`/home/zjy/inspection_sim_ws`) for a tracked inspection robot. Three packages under `src/`:
+ROS 2 Jazzy simulation-only workspace (`/home/zjy/inspection_sim_ws`) for a tracked inspection robot. Packages under `src/`:
 
 - **`inspection_sim_bringup/`** — ament_cmake package for Gazebo Sim, SLAM, EKF, Nav2. All assets (launch, config, urdf, models, worlds, rviz, behavior_trees).
 - **`inspection_sim_gui/`** — ament_python PyQt5 control panel. Entrypoint: `inspection_sim_gui/main.py:main` → console script `inspection_sim_gui`.
+- **`inspection_sim_mission/`** — ament_python mission, region, and simulation sensor helper nodes.
 - **`rf2o_laser_odometry/`** — laser odometry (third-party, do not edit).
+- **`robot_mission_utils/`** — pure Python mission planning utilities.
+- **`robot_monitor_interfaces/`** — custom mission message/service interfaces.
 
 ## Build
 
@@ -36,9 +39,10 @@ Quick-check without GUI: `navigation.launch.py use_rviz:=false headless:=true`.
 
 The EKF uses two inputs: `/laser_odom` (x, y, yaw, vx, vy, wz) and `/imu/data_raw` (yaw only). Config: `config/ekf.yaml`.
 
-## Gazebo ↔ ROS bridge
+## Gazebo -> ROS bridge
 
-Topics bridged via `ros_gz_bridge` parameter_bridge: `/clock`, `/cmd_vel`, `/scan`, `/imu/data_raw`.
+Topics bridged via `ros_gz_bridge` parameter_bridge: `/clock`, `/cmd_vel`, `/scan`, `/sim/imu/data_raw`.
+`inspection_sim_mission/sim_imu_adapter` republishes `/sim/imu/data_raw` as `/imu/data_raw`.
 
 ## Nav2 specifics
 

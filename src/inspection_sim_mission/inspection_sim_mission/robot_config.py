@@ -19,9 +19,6 @@ TOPIC_MISSION_GOAL_POSE = "/mission_goal_pose"
 TOPIC_GOAL_POSE = "/goal_pose"
 TOPIC_MISSION_PREVIEW_PATH = "/mission_preview_path"
 TOPIC_MISSION_POINTS_MARKERS = "/mission_points_markers"
-TOPIC_ROBOT_SAFETY_STATUS = "/robot_safety_status"
-TOPIC_THERMAL_FRAME = "/thermal_frame"
-TOPIC_GAS_DATA = "/gas_data"
 TOPIC_IMU_RAW = "/imu/data_raw"
 TOPIC_SIM_IMU_RAW = "/sim/imu/data_raw"
 
@@ -37,27 +34,6 @@ SERVICE_CLEAR_INSPECTION_REGIONS = "/clear_inspection_regions"
 SERVICE_SAVE_INSPECTION_REGIONS = "/save_inspection_regions"
 SERVICE_LOAD_INSPECTION_REGIONS = "/load_inspection_regions"
 SERVICE_ABORT_MISSION = "/abort_mission"
-SERVICE_RESET_SAFETY_MONITOR = "/reset_safety_monitor"
-
-LIDAR_SERIAL_PORT = "/dev/serial/by-path/platform-xhci-hcd.0-usb-0:2:1.0-port0"
-LIDAR_BAUDRATE = "115200"
-LIDAR_Z = "0.10"
-LIDAR_YAW = "3.1415926"
-
-IMU_SERIAL_PORT = "/dev/ttyAMA0"
-IMU_X = "-0.125"
-IMU_Y = "-0.031"
-IMU_Z = "0.040"
-
-LEFT_PWM_PIN = 18
-LEFT_IN1_PIN = 22
-LEFT_IN2_PIN = 27
-RIGHT_PWM_PIN = 23
-RIGHT_IN1_PIN = 25
-RIGHT_IN2_PIN = 24
-
-WHEEL_RADIUS_M = 0.025
-TRACK_WIDTH_M = 0.156
 
 INSPECTION_REGIONS_PATH = os.path.join(
     os.path.expanduser("~/inspection_sim_ws"),
