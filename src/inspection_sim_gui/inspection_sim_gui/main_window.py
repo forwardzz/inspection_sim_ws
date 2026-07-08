@@ -1,10 +1,13 @@
 from glob import glob
 import math
 import os
+import re
+import subprocess
 import time
 
+from ament_index_python.packages import get_package_share_directory
 from PyQt5.QtCore import QObject, QPointF, QSettings, QTimer, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF
+from PyQt5.QtGui import QBrush, QColor, QPainter, QPen, QPixmap, QPolygonF
 from PyQt5.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
@@ -43,12 +46,18 @@ from .config import (
 )
 from .launch_manager import LaunchManager
 
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
 
 class GuiSignals(QObject):
     log = pyqtSignal(str)
     nav_feedback = pyqtSignal(str)
     nav_result = pyqtSignal(str)
     service_result = pyqtSignal(str, bool, str, str)
+    mission_status = pyqtSignal(str, bool)
 
 
 class MapView(QWidget):
@@ -165,9 +174,16 @@ class MainWindow(QMainWindow):
         self.signals.nav_feedback.connect(self.append_log)
         self.signals.nav_result.connect(self._nav_result)
         self.signals.service_result.connect(self._service_result)
+        self.signals.mission_status.connect(self._mission_status)
         self._pending_initial_pose = None
         self._initial_pose_retries_remaining = 0
         self.pose_history = []
+        self._last_system_status_update = 0.0
+        self._system_status_cache = {
+            "host": "主机: 等待数据",
+            "gpu": "GPU: 等待数据",
+            "temp": "温度: 等待数据",
+        }
 
         self.setWindowTitle("巡检小车仿真控制台")
         self.resize(1260, 780)
@@ -194,16 +210,22 @@ class MainWindow(QMainWindow):
         self.init_x_spin = self._double_spin(-20.0, 20.0, 0.0, 0.05)
         self.init_y_spin = self._double_spin(-20.0, 20.0, 0.0, 0.05)
         self.init_yaw_spin = self._double_spin(-180.0, 180.0, 0.0, 1.0)
-        self.goal_x_spin = self._double_spin(-20.0, 20.0, 0.3, 0.05)
-        self.goal_y_spin = self._double_spin(-20.0, 20.0, 0.0, 0.05)
-        self.goal_yaw_spin = self._double_spin(-180.0, 180.0, 0.0, 1.0)
+        try:
+            pause_default = float(self.settings.value("waypoint_pause_sec", 2.0))
+        except (TypeError, ValueError):
+            pause_default = 2.0
+        self.waypoint_pause_spin = self._double_spin(0.0, 60.0, pause_default, 0.5)
 
         self.pose_label = QLabel("里程计: 等待数据")
         self.velocity_label = QLabel("速度: 等待数据")
+        self.wheel_odom_label = QLabel("编码器里程计: 等待数据")
         self.amcl_label = QLabel("AMCL: 等待数据")
         self.map_label = QLabel("地图: 等待数据")
         self.nav_label = QLabel("导航: 空闲")
         self.launch_label = QLabel("启动状态: 空闲")
+        self.host_label = QLabel("主机: 等待数据")
+        self.gpu_label = QLabel("GPU: 等待数据")
+        self.temp_label = QLabel("温度: 等待数据")
         self.mission_label = QLabel("任务: 等待服务")
         self.mission_label.setWordWrap(True)
         self.region_mode_check = QCheckBox("区域模式")
@@ -212,6 +234,7 @@ class MainWindow(QMainWindow):
             "scan": QLabel("/scan"),
             "imu": QLabel("/imu"),
             "laser_odom": QLabel("/laser_odom"),
+            "wheel_odom": QLabel("/wheel_odom"),
             "odom": QLabel("/odom"),
             "map": QLabel("/map"),
             "amcl": QLabel("/amcl_pose"),
@@ -238,9 +261,18 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(10)
 
+        header = QHBoxLayout()
+        logo = QLabel()
+        logo_pix = QPixmap(self._asset_path("wut_logo.png"))
+        if not logo_pix.isNull():
+            logo.setPixmap(logo_pix.scaledToHeight(46, Qt.SmoothTransformation))
+            logo.setFixedSize(58, 50)
+            logo.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         title = QLabel("巡检小车仿真控制台")
         title.setObjectName("Title")
-        root.addWidget(title)
+        header.addWidget(logo)
+        header.addWidget(title, 1)
+        root.addLayout(header)
 
         splitter = QSplitter(Qt.Horizontal)
         root.addWidget(splitter, 1)
@@ -321,31 +353,10 @@ class MainWindow(QMainWindow):
         init_buttons = QVBoxLayout()
         set_initial = QPushButton("设置初始位姿")
         set_initial.clicked.connect(self.set_initial_pose)
-        copy_odom = QPushButton("复制里程计")
-        copy_odom.clicked.connect(self.copy_odom_to_initial)
         init_buttons.addWidget(set_initial)
-        init_buttons.addWidget(copy_odom)
         init_buttons.addStretch(1)
         layout.addLayout(init_buttons, 0, 1)
-
-        goal_form = QFormLayout()
-        goal_form.addRow("目标 X", self.goal_x_spin)
-        goal_form.addRow("目标 Y", self.goal_y_spin)
-        goal_form.addRow("目标航向 deg", self.goal_yaw_spin)
-        layout.addLayout(goal_form, 0, 2)
-
-        goal_buttons = QVBoxLayout()
-        publish_goal = QPushButton("发布 /goal_pose")
-        publish_goal.clicked.connect(self.publish_goal_pose)
-        send_nav = QPushButton("发送 Nav2 目标")
-        send_nav.clicked.connect(self.send_nav_goal)
-        cancel_nav = QPushButton("取消 Nav2 目标")
-        cancel_nav.clicked.connect(self.ros.cancel_nav_goal)
-        goal_buttons.addWidget(publish_goal)
-        goal_buttons.addWidget(send_nav)
-        goal_buttons.addWidget(cancel_nav)
-        goal_buttons.addStretch(1)
-        layout.addLayout(goal_buttons, 0, 3)
+        layout.setColumnStretch(2, 1)
         return group
 
     def _build_mission_group(self):
@@ -357,12 +368,19 @@ class MainWindow(QMainWindow):
         check_localization.clicked.connect(self.check_localization)
         start_mission = QPushButton("开始任务")
         start_mission.clicked.connect(self.start_mission)
+        stop_all = QPushButton("停止所有任务")
+        stop_all.clicked.connect(self.stop_all_tasks)
         clear_points = QPushButton("清空点位")
         clear_points.clicked.connect(self.clear_rviz_points)
         top.addWidget(check_localization)
         top.addWidget(start_mission)
+        top.addWidget(stop_all)
         top.addWidget(clear_points)
         layout.addLayout(top)
+
+        params = QFormLayout()
+        params.addRow("点位停留时间 s", self.waypoint_pause_spin)
+        layout.addLayout(params)
 
         region = QHBoxLayout()
         self.region_mode_check.clicked.connect(self.set_region_mode)
@@ -403,7 +421,7 @@ class MainWindow(QMainWindow):
         buttons = {
             (0, 1): ("W", self.drive_forward),
             (1, 0): ("A", self.turn_left),
-            (1, 1): ("停止", self.stop_robot),
+            (1, 1): ("Space 空格", self.stop_robot),
             (1, 2): ("D", self.turn_right),
             (2, 1): ("S", self.drive_backward),
         }
@@ -441,10 +459,14 @@ class MainWindow(QMainWindow):
         for label in [
             self.pose_label,
             self.velocity_label,
+            self.wheel_odom_label,
             self.amcl_label,
             self.map_label,
             self.nav_label,
             self.launch_label,
+            self.host_label,
+            self.gpu_label,
+            self.temp_label,
         ]:
             label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             layout.addWidget(label)
@@ -475,7 +497,7 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(
             """
             QMainWindow, QWidget { background: #f0f2f2; color: #202426; }
-            QLabel#Title { font-size: 22px; font-weight: 700; padding: 6px; }
+            QLabel#Title { font-size: 22px; font-weight: 700; padding: 6px 0; }
             QLabel#Hint { color: #667174; }
             QGroupBox {
                 font-weight: 700;
@@ -504,6 +526,18 @@ class MainWindow(QMainWindow):
             QPushButton:pressed { background: #234758; }
             """
         )
+
+    def _asset_path(self, filename):
+        try:
+            return os.path.join(
+                get_package_share_directory("inspection_sim_gui"),
+                "assets",
+                filename,
+            )
+        except Exception:
+            return os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "assets", filename)
+            )
 
     def _double_spin(self, minimum, maximum, value, step):
         spin = QDoubleSpinBox()
@@ -580,12 +614,26 @@ class MainWindow(QMainWindow):
         )
 
     def start_mission(self):
-        self.append_log("[MISSION] start mission")
+        request = StartNavigation.Request()
+        request.waypoint_pause_sec = float(self.waypoint_pause_spin.value())
+        self.settings.setValue("waypoint_pause_sec", request.waypoint_pause_sec)
+        self.append_log(f"[MISSION] start mission pause={request.waypoint_pause_sec:.1f}s")
         self.ros.call_service_async(
             self.ros.start_navigation_client,
-            StartNavigation.Request(),
+            request,
             lambda result, error: self._emit_service_result("开始任务", result, error),
             timeout_sec=10.0,
+        )
+
+    def stop_all_tasks(self):
+        self.append_log("[MISSION] stop all tasks")
+        self.ros.publish_cmd_vel(0.0, 0.0)
+        self.ros.cancel_nav_goal()
+        self.ros.call_service_async(
+            self.ros.abort_mission_client,
+            Trigger.Request(),
+            lambda result, error: self._emit_service_result("停止所有任务", result, error),
+            timeout_sec=6.0,
         )
 
     def clear_rviz_points(self):
@@ -666,6 +714,17 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.warning(self, title, message or "未完成")
 
+    def _mission_status(self, message, safety):
+        if not message:
+            return
+        if safety:
+            self.append_log(f"[SAFETY] {message}")
+            self.mission_label.setText(f"安全提醒: {message}")
+            QMessageBox.warning(self, "安全提醒", message)
+        else:
+            self.append_log(f"[MISSION] {message}")
+            self.mission_label.setText(f"任务: {message}")
+
     def set_initial_pose(self):
         self._pending_initial_pose = (
             self.init_x_spin.value(),
@@ -701,20 +760,6 @@ class MainWindow(QMainWindow):
         self.init_x_spin.setValue(snap["x"])
         self.init_y_spin.setValue(snap["y"])
         self.init_yaw_spin.setValue(math.degrees(snap["yaw"]))
-
-    def publish_goal_pose(self):
-        self.ros.publish_goal_pose(
-            self.goal_x_spin.value(),
-            self.goal_y_spin.value(),
-            math.radians(self.goal_yaw_spin.value()),
-        )
-
-    def send_nav_goal(self):
-        self.ros.send_nav_goal(
-            self.goal_x_spin.value(),
-            self.goal_y_spin.value(),
-            math.radians(self.goal_yaw_spin.value()),
-        )
 
     def drive_forward(self):
         self.ros.publish_cmd_vel(self.linear_spin.value(), 0.0)
@@ -773,6 +818,7 @@ class MainWindow(QMainWindow):
         self._set_topic("scan", now - snap["last_scan"], f"scan {snap['scan_count']} {snap['scan_frame']}")
         self._set_topic("imu", now - snap["last_imu"], f"imu {snap['imu_frame']}")
         self._set_topic("laser_odom", now - snap["last_laser_odom"], "laser odom")
+        self._set_topic("wheel_odom", now - snap["last_wheel_odom"], "wheel odom")
         self._set_topic("odom", now - snap["last_odom"], "odom")
         self._set_topic("map", now - snap["last_map"], "map")
         self._set_topic("amcl", now - snap["last_amcl"], "amcl")
@@ -782,6 +828,9 @@ class MainWindow(QMainWindow):
         )
         self.velocity_label.setText(
             f"速度: 线={snap['vx']:.3f} m/s  角={snap['wz']:.3f} rad/s"
+        )
+        self.wheel_odom_label.setText(
+            f"编码器里程计: 线={snap['wheel_vx']:.3f} m/s  角={snap['wheel_wz']:.3f} rad/s"
         )
         self.amcl_label.setText(
             f"AMCL: x={snap['amcl_x']:.3f}  y={snap['amcl_y']:.3f}  yaw={math.degrees(snap['amcl_yaw']):.1f} deg"
@@ -804,6 +853,91 @@ class MainWindow(QMainWindow):
             self.nav_label.setText(f"导航: {snap['nav_status']}")
         else:
             self.nav_label.setText(f"导航: {snap['nav_status']}  剩余={distance:.2f} m")
+        self._refresh_system_status(now)
+
+    def _refresh_system_status(self, now):
+        if now - self._last_system_status_update < 1.5:
+            self.host_label.setText(self._system_status_cache["host"])
+            self.gpu_label.setText(self._system_status_cache["gpu"])
+            self.temp_label.setText(self._system_status_cache["temp"])
+            return
+
+        self._last_system_status_update = now
+        self._system_status_cache["host"] = self._read_host_status()
+        self._system_status_cache["gpu"] = self._read_gpu_status()
+        self._system_status_cache["temp"] = self._read_temperature_status()
+        self.host_label.setText(self._system_status_cache["host"])
+        self.gpu_label.setText(self._system_status_cache["gpu"])
+        self.temp_label.setText(self._system_status_cache["temp"])
+
+    def _read_host_status(self):
+        if psutil is None:
+            return "主机: psutil 不可用"
+        cpu = psutil.cpu_percent(interval=None)
+        memory = psutil.virtual_memory()
+        used_gb = memory.used / (1024 ** 3)
+        total_gb = memory.total / (1024 ** 3)
+        return (
+            f"主机: CPU={cpu:.0f}%  内存={memory.percent:.0f}% "
+            f"({used_gb:.1f}/{total_gb:.1f} GB)"
+        )
+
+    def _read_gpu_status(self):
+        try:
+            result = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+                    "--format=csv,noheader,nounits",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=0.8,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return "GPU: 不可用"
+        if result.returncode != 0 or not result.stdout.strip():
+            return "GPU: 不可用"
+        fields = [field.strip() for field in result.stdout.splitlines()[0].split(",")]
+        if len(fields) < 4:
+            return "GPU: 不可用"
+        util, mem_used, mem_total, temp = fields[:4]
+        return f"GPU: {util}%  显存={mem_used}/{mem_total} MB  温度={temp} C"
+
+    def _read_temperature_status(self):
+        temperatures = []
+        if psutil is not None and hasattr(psutil, "sensors_temperatures"):
+            try:
+                for entries in psutil.sensors_temperatures().values():
+                    for entry in entries:
+                        if entry.current is not None and entry.current > 0:
+                            temperatures.append(float(entry.current))
+            except Exception:
+                temperatures = []
+        if not temperatures:
+            temperatures = self._read_temperatures_from_sensors()
+        if not temperatures:
+            return "温度: 不可用"
+        return f"温度: 最高 {max(temperatures):.1f} C"
+
+    def _read_temperatures_from_sensors(self):
+        try:
+            result = subprocess.run(
+                ["sensors"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=0.8,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        if result.returncode != 0:
+            return []
+        return [
+            float(match.group(1))
+            for match in re.finditer(r"\+([0-9]+(?:\.[0-9]+)?)\s*°?C", result.stdout)
+        ]
 
     def _record_pose(self, x, y):
         point = (round(float(x), 2), round(float(y), 2))
