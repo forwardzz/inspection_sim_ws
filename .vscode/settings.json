@@ -1,0 +1,6 @@
+{
+    "cmake.sourceDirectory": "/home/zjy/inspection_sim_ws/src/inspection_sim_bringup",
+    "python.analysis.extraPaths": [
+        "./build/robot_mission_utils"
+    ]
+}

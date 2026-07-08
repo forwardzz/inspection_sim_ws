@@ -26,8 +26,9 @@ def generate_region_points(regions, sweep_spacing, region_margin):
     first_error = None
     for region in regions:
         region_points = generate_points_for_region(region, sweep_spacing, region_margin)
+        region_generated = []
         for point_index, (x, y) in enumerate(region_points, start=1):
-            generated.append(
+            region_generated.append(
                 make_inspection_point(
                     f"{region.name}_P{point_index}",
                     x,
@@ -35,6 +36,8 @@ def generate_region_points(regions, sweep_spacing, region_margin):
                     0.0,
                 )
             )
+        if region_generated:
+            generated.extend(smooth_region_sweep(region_generated, region, region_margin))
         if not region_points:
             message = (
                 f"{region.name} is too small for spacing={sweep_spacing:.2f}m "
@@ -113,6 +116,86 @@ def assign_path_headings(points):
         dy = target.y - source.y
         if abs(dx) > 1e-6 or abs(dy) > 1e-6:
             points[index].theta = math.atan2(dy, dx)
+
+
+def clamp(value, lower, upper):
+    return max(lower, min(upper, value))
+
+
+def transition_offset_for_margin(region_margin):
+    return min(0.15, max(0.0, region_margin * 0.8))
+
+
+def transition_point_is_useful(x, y, p, q, nxt, effective_offset, requested_offset):
+    min_effective_offset = min(0.01, requested_offset * 0.5)
+    if effective_offset < min_effective_offset:
+        return False
+
+    for point in (p, q, nxt):
+        if math.hypot(x - point.x, y - point.y) < 0.02:
+            return False
+    return True
+
+
+def smooth_region_sweep(points, region, region_margin):
+    if len(points) < 3:
+        return points
+    safe_min_x = region.min_x + region_margin
+    safe_min_y = region.min_y + region_margin
+    safe_max_x = region.max_x - region_margin
+    safe_max_y = region.max_y - region_margin
+    if safe_min_x > safe_max_x or safe_min_y > safe_max_y:
+        return points
+
+    transition_offset = transition_offset_for_margin(region_margin)
+    if transition_offset <= 1e-6:
+        return points
+
+    result = []
+    for i in range(len(points)):
+        p = points[i]
+        result.append(p)
+        if i + 2 >= len(points):
+            continue
+        q = points[i + 1]
+        nxt = points[i + 2]
+        dx = q.x - p.x
+        dy = q.y - p.y
+        if abs(dx) < 1e-3 and abs(dy) > 0.02:
+            nrow_dir = 1.0 if nxt.x > q.x else -1.0
+            out_dir = -nrow_dir
+            x = clamp(q.x + out_dir * transition_offset, safe_min_x, safe_max_x)
+            y = clamp(p.y + dy * 0.5, safe_min_y, safe_max_y)
+            effective_offset = abs(x - q.x)
+            if not transition_point_is_useful(
+                x, y, p, q, nxt, effective_offset, transition_offset
+            ):
+                continue
+            mid = make_inspection_point(
+                "TR_{}".format(p.point_name),
+                x,
+                y,
+                0.0,
+            )
+            result.append(mid)
+        elif abs(dy) < 1e-3 and abs(dx) > 0.02:
+            nrow_dir = 1.0 if nxt.y > q.y else -1.0
+            out_dir = -nrow_dir
+            x = clamp(p.x + dx * 0.5, safe_min_x, safe_max_x)
+            y = clamp(q.y + out_dir * transition_offset, safe_min_y, safe_max_y)
+            effective_offset = abs(y - q.y)
+            if not transition_point_is_useful(
+                x, y, p, q, nxt, effective_offset, transition_offset
+            ):
+                continue
+            mid = make_inspection_point(
+                "TR_{}".format(p.point_name),
+                x,
+                y,
+                0.0,
+            )
+            result.append(mid)
+    return result
 
 
 def regions_to_yaml_data(regions, sweep_spacing, region_margin):

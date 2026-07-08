@@ -61,11 +61,12 @@ from .ros_utils import inspection_point_to_pose, make_inspection_point, quat_to_
 class MissionManager(Node):
     DEFAULT_WAYPOINT_PAUSE_SEC = 2.0
     MAX_WAYPOINT_PAUSE_SEC = 60.0
+    RELAXED_GOAL_DISTANCE_M = 0.20
 
     def __init__(self):
         super().__init__("mission_manager")
 
-        self.sweep_spacing = float(self.declare_parameter("sweep_spacing", 0.30).value)
+        self.sweep_spacing = float(self.declare_parameter("sweep_spacing", 0.50).value)
         self.region_margin = float(self.declare_parameter("region_margin", 0.15).value)
         self.regions_path = str(
             self.declare_parameter(
@@ -100,6 +101,7 @@ class MissionManager(Node):
         self.mission_run_id = 0
         self.mission_waypoint_pause_sec = self.DEFAULT_WAYPOINT_PAUSE_SEC
         self.last_mission_feedback_log_time = 0.0
+        self.mission_early_transition_goal = None
         self.direct_goal_handle = None
         self.direct_nav_active = False
         self.last_direct_feedback_log_time = 0.0
@@ -147,6 +149,9 @@ class MissionManager(Node):
         self.create_service(Trigger, SERVICE_ABORT_MISSION, self._handle_abort_mission)
 
         self.nav_to_pose_client = ActionClient(self, NavigateToPose, ACTION_NAVIGATE_TO_POSE)
+        self.mission_position_timer = self.create_timer(
+            0.25, self._check_mission_early_transition
+        )
         self.get_logger().info("Mission manager ready")
 
     def _odom_cb(self, msg):
@@ -923,6 +928,7 @@ class MissionManager(Node):
         self.mission_run_id += 1
         self.mission_waypoint_pause_sec = pause_sec
         self.last_mission_feedback_log_time = 0.0
+        self.mission_early_transition_goal = None
         self.mission_active = True
         return self._send_current_mission_goal()
 
@@ -938,8 +944,19 @@ class MissionManager(Node):
         total = len(self.mission_points)
         run_id = self.mission_run_id
 
+        if self.mission_source == "region":
+            dx = point.x - self.current_map_pose["x"]
+            dy = point.y - self.current_map_pose["y"]
+            if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+                theta = self.current_map_pose["theta"]
+            else:
+                theta = math.atan2(dy, dx)
+            goal_point = self._make_inspection_point(point.point_name, point.x, point.y, theta)
+        else:
+            goal_point = point
+
         goal = NavigateToPose.Goal()
-        goal.pose = self._inspection_point_to_pose(point)
+        goal.pose = self._inspection_point_to_pose(goal_point)
         goal.behavior_tree = ""
 
         try:
@@ -1020,6 +1037,11 @@ class MissionManager(Node):
         if not self._is_current_mission_goal(run_id, waypoint_index):
             return
 
+        early_transition_goal = (run_id, waypoint_index)
+        is_early_transition_cancel = self.mission_early_transition_goal == early_transition_goal
+        if is_early_transition_cancel:
+            self.mission_early_transition_goal = None
+
         self.goal_handle = None
         try:
             result_msg = future.result()
@@ -1029,12 +1051,13 @@ class MissionManager(Node):
             return
 
         if result.error_code != NavigateToPose.Result.NONE:
-            point_name = self.mission_points[waypoint_index].point_name
-            self._finish_mission_failed(
-                f"Mission waypoint {waypoint_index + 1}/{len(self.mission_points)} "
-                f"({point_name}) failed with code {result.error_code}: {result.error_msg}"
-            )
-            return
+            if not is_early_transition_cancel:
+                point_name = self.mission_points[waypoint_index].point_name
+                self._finish_mission_failed(
+                    f"Mission waypoint {waypoint_index + 1}/{len(self.mission_points)} "
+                    f"({point_name}) failed with code {result.error_code}: {result.error_msg}"
+                )
+                return
 
         self._publish_zero_cmd()
         point_name = self.mission_points[waypoint_index].point_name
@@ -1072,6 +1095,40 @@ class MissionManager(Node):
             return
         self._send_current_mission_goal()
 
+    def _check_mission_early_transition(self):
+        if not self.mission_active or self.mission_source != "region":
+            return
+        if self.goal_handle is None:
+            return
+        if self.mission_index >= len(self.mission_points):
+            return
+        if self.mission_index == len(self.mission_points) - 1:
+            return
+        if not self.have_map_pose:
+            return
+
+        waypoint = self.mission_points[self.mission_index]
+        dx = self.current_map_pose["x"] - waypoint.x
+        dy = self.current_map_pose["y"] - waypoint.y
+        distance = math.hypot(dx, dy)
+        if distance >= self.RELAXED_GOAL_DISTANCE_M:
+            return
+
+        early_transition_goal = (self.mission_run_id, self.mission_index)
+        if self.mission_early_transition_goal == early_transition_goal:
+            return
+
+        self.get_logger().info(
+            f"Early transition on waypoint {self.mission_index + 1}/{len(self.mission_points)} "
+            f"({waypoint.point_name}) at {distance:.3f}m (tolerance {self.RELAXED_GOAL_DISTANCE_M:.2f}m)"
+        )
+        try:
+            self.goal_handle.cancel_goal_async()
+        except Exception as exc:
+            self.get_logger().warn(f"Failed to request early waypoint transition: {exc}")
+            return
+        self.mission_early_transition_goal = early_transition_goal
+
     def _is_current_mission_goal(self, run_id, waypoint_index):
         return (
             self.mission_active
@@ -1093,6 +1150,7 @@ class MissionManager(Node):
         self.mission_source = ""
         self.mission_waypoint_pause_sec = self.DEFAULT_WAYPOINT_PAUSE_SEC
         self.last_mission_feedback_log_time = 0.0
+        self.mission_early_transition_goal = None
 
     def _finish_mission_success(self):
         self.goal_handle = None
