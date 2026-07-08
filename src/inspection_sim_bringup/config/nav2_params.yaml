@@ -77,7 +77,7 @@ controller_server:
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::PositionGoalChecker"
-      xy_goal_tolerance: 0.30
+      xy_goal_tolerance: 0.10
 
     FollowPath:
       plugin: "nav2_rotation_shim_controller::RotationShimController"

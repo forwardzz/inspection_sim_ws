@@ -35,13 +35,13 @@ Quick-check without GUI: `navigation.launch.py use_rviz:=false headless:=true`.
 
 ## Odometry chain
 
-`/scan` → `rf2o_laser_odometry` → `/laser_odom` → `robot_localization::ekf` (+ `/imu/data_raw`) → `/odom`
+`/scan` → `rf2o_laser_odometry` → `/laser_odom` → `robot_localization::ekf` (+ `/wheel_odom`, `/imu/data_raw`) → `/odom`
 
-The EKF uses two inputs: `/laser_odom` (x, y, yaw, vx, vy, wz) and `/imu/data_raw` (yaw only). Config: `config/ekf.yaml`.
+The EKF uses three inputs: `/laser_odom` (x, y, yaw, vx, vy, wz), `/wheel_odom` (encoder-derived vx and wz), and `/imu/data_raw` (yaw only). Config: `config/ekf.yaml`.
 
 ## Gazebo -> ROS bridge
 
-Topics bridged via `ros_gz_bridge` parameter_bridge: `/clock`, `/cmd_vel`, `/scan`, `/sim/imu/data_raw`.
+Topics bridged via `ros_gz_bridge` parameter_bridge: `/clock`, `/cmd_vel`, `/scan`, `/sim/imu/data_raw`, `/wheel_odom`.
 `inspection_sim_mission/sim_imu_adapter` republishes `/sim/imu/data_raw` as `/imu/data_raw`.
 
 ## Nav2 specifics
@@ -56,7 +56,7 @@ Topics bridged via `ros_gz_bridge` parameter_bridge: `/clock`, `/cmd_vel`, `/sca
 
 The GUI (`gui.launch.py`) spawns a node that reads `workspace_path`, `map_path`, `ros_setup_path` parameters. It runs launches as child processes via `QProcess` using `setsid bash -lc '<source ros && source install && command>'` — never use nested `ros2 launch` calls manually inside the GUI's workspace.
 
-Manual drive via `/cmd_vel` (keyboard or WASD buttons). Nav2 goal via NavigateToPose action server. Initial pose via `/initialpose`.
+Manual drive via `/cmd_vel` (keyboard WASD and Space stop). Mission start goes through `/start_navigation`; the GUI sends a per-waypoint pause value and mission goals are dispatched one `NavigateToPose` target at a time. Initial pose via `/initialpose`.
 
 ## Config files
 

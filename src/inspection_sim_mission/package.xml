@@ -17,6 +17,7 @@
   <depend>robot_mission_utils</depend>
   <depend>robot_monitor_interfaces</depend>
   <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
   <depend>std_srvs</depend>
   <depend>visualization_msgs</depend>
 

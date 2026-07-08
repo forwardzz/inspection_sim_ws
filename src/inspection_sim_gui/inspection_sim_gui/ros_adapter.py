@@ -17,6 +17,7 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 from sensor_msgs.msg import Imu, LaserScan
+from std_msgs.msg import String
 from std_srvs.srv import SetBool, Trigger
 
 from robot_monitor_interfaces.srv import Localize, StartNavigation
@@ -38,8 +39,10 @@ from .config import (
     TOPIC_INITIAL_POSE,
     TOPIC_LASER_ODOM,
     TOPIC_MAP,
+    TOPIC_MISSION_STATUS,
     TOPIC_ODOM,
     TOPIC_SCAN,
+    TOPIC_WHEEL_ODOM,
 )
 
 
@@ -55,7 +58,13 @@ def quaternion_to_yaw(q):
 
 
 class RosAdapter:
-    def __init__(self, status_callback=None, feedback_callback=None, result_callback=None):
+    def __init__(
+        self,
+        status_callback=None,
+        feedback_callback=None,
+        result_callback=None,
+        mission_status_callback=None,
+    ):
         if not rclpy.ok():
             rclpy.init(args=None)
 
@@ -65,6 +74,7 @@ class RosAdapter:
         self.status_callback = status_callback
         self.feedback_callback = feedback_callback
         self.result_callback = result_callback
+        self.mission_status_callback = mission_status_callback
         self._lock = threading.Lock()
         self._goal_handle = None
 
@@ -106,12 +116,14 @@ class RosAdapter:
 
         self.node.create_subscription(Odometry, TOPIC_ODOM, self._odom_cb, 10)
         self.node.create_subscription(Odometry, TOPIC_LASER_ODOM, self._laser_odom_cb, 10)
+        self.node.create_subscription(Odometry, TOPIC_WHEEL_ODOM, self._wheel_odom_cb, 10)
         self.node.create_subscription(LaserScan, TOPIC_SCAN, self._scan_cb, qos_profile_sensor_data)
         self.node.create_subscription(Imu, TOPIC_IMU_RAW, self._imu_cb, qos_profile_sensor_data)
         self.node.create_subscription(OccupancyGrid, TOPIC_MAP, self._map_cb, map_qos)
         self.node.create_subscription(
             PoseWithCovarianceStamped, TOPIC_AMCL_POSE, self._amcl_cb, 10
         )
+        self.node.create_subscription(String, TOPIC_MISSION_STATUS, self._mission_status_cb, 10)
 
         self.nav_client = ActionClient(self.node, NavigateToPose, ACTION_NAVIGATE_TO_POSE)
 
@@ -123,6 +135,7 @@ class RosAdapter:
             "last_imu": 0.0,
             "imu_frame": "",
             "last_laser_odom": 0.0,
+            "last_wheel_odom": 0.0,
             "last_odom": 0.0,
             "last_map": 0.0,
             "last_amcl": 0.0,
@@ -135,12 +148,15 @@ class RosAdapter:
             "yaw": 0.0,
             "vx": 0.0,
             "wz": 0.0,
+            "wheel_vx": 0.0,
+            "wheel_wz": 0.0,
             "amcl_x": 0.0,
             "amcl_y": 0.0,
             "amcl_yaw": 0.0,
             "started": now,
             "nav_status": "idle",
             "nav_distance_remaining": None,
+            "mission_status": "",
         }
 
         self.spin_thread = threading.Thread(target=self.executor.spin, daemon=True)
@@ -259,6 +275,12 @@ class RosAdapter:
         with self._lock:
             self.data["last_laser_odom"] = time.monotonic()
 
+    def _wheel_odom_cb(self, msg):
+        with self._lock:
+            self.data["last_wheel_odom"] = time.monotonic()
+            self.data["wheel_vx"] = float(msg.twist.twist.linear.x)
+            self.data["wheel_wz"] = float(msg.twist.twist.angular.z)
+
     def _scan_cb(self, msg):
         with self._lock:
             self.data["scan_count"] = len(msg.ranges)
@@ -285,6 +307,15 @@ class RosAdapter:
             self.data["amcl_y"] = float(msg.pose.pose.position.y)
             self.data["amcl_yaw"] = quaternion_to_yaw(q)
             self.data["last_amcl"] = time.monotonic()
+
+    def _mission_status_cb(self, msg):
+        text = str(msg.data)
+        safety = text.startswith("[SAFETY]")
+        message = text[len("[SAFETY]"):].strip() if safety else text
+        with self._lock:
+            self.data["mission_status"] = message
+        if self.mission_status_callback:
+            self.mission_status_callback.emit(message, safety)
 
     def _nav_feedback_cb(self, feedback_msg):
         feedback = feedback_msg.feedback
