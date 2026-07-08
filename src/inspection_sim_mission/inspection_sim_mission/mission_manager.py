@@ -5,12 +5,11 @@ import yaml
 
 import rclpy
 from geometry_msgs.msg import Point, PointStamped, PoseStamped, PoseWithCovarianceStamped, Twist
-from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import NavigateThroughPoses, NavigateToPose
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from rclpy.action import ActionClient
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from std_msgs.msg import String
 from std_srvs.srv import SetBool, Trigger
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -32,6 +31,7 @@ from .mission_regions import (
 )
 from .qos import latched_qos
 from .robot_config import (
+    ACTION_NAVIGATE_THROUGH_POSES,
     ACTION_NAVIGATE_TO_POSE,
     FRAME_MAP,
     INSPECTION_REGIONS_PATH,
@@ -52,16 +52,12 @@ from .robot_config import (
     TOPIC_MISSION_GOAL_POSE,
     TOPIC_MISSION_POINTS_MARKERS,
     TOPIC_MISSION_PREVIEW_PATH,
-    TOPIC_MISSION_STATUS,
     TOPIC_ODOM,
 )
 from .ros_utils import inspection_point_to_pose, make_inspection_point, quat_to_yaw
 
 
 class MissionManager(Node):
-    DEFAULT_WAYPOINT_PAUSE_SEC = 2.0
-    MAX_WAYPOINT_PAUSE_SEC = 60.0
-
     def __init__(self):
         super().__init__("mission_manager")
 
@@ -93,13 +89,6 @@ class MissionManager(Node):
         self.region_generation_error = None
         self.goal_handle = None
         self.mission_active = False
-        self.mission_points = []
-        self.mission_index = 0
-        self.mission_source = ""
-        self.mission_wait_timer = None
-        self.mission_run_id = 0
-        self.mission_waypoint_pause_sec = self.DEFAULT_WAYPOINT_PAUSE_SEC
-        self.last_mission_feedback_log_time = 0.0
         self.direct_goal_handle = None
         self.direct_nav_active = False
         self.last_direct_feedback_log_time = 0.0
@@ -118,7 +107,6 @@ class MissionManager(Node):
         self.preview_pub = self.create_publisher(Path, TOPIC_MISSION_PREVIEW_PATH, latched_qos())
         self.marker_pub = self.create_publisher(MarkerArray, TOPIC_MISSION_POINTS_MARKERS, latched_qos())
         self.cmd_vel_nav_pub = self.create_publisher(Twist, TOPIC_CMD_VEL_NAV, 10)
-        self.mission_status_pub = self.create_publisher(String, TOPIC_MISSION_STATUS, 10)
 
         self.create_service(Localize, SERVICE_LOCALIZE_ROBOT, self._handle_localize)
         self.create_service(
@@ -146,6 +134,7 @@ class MissionManager(Node):
         )
         self.create_service(Trigger, SERVICE_ABORT_MISSION, self._handle_abort_mission)
 
+        self.nav_client = ActionClient(self, NavigateThroughPoses, ACTION_NAVIGATE_THROUGH_POSES)
         self.nav_to_pose_client = ActionClient(self, NavigateToPose, ACTION_NAVIGATE_TO_POSE)
         self.get_logger().info("Mission manager ready")
 
@@ -193,14 +182,6 @@ class MissionManager(Node):
             float(msg.point.y),
             0.0,
         )
-        valid, reason = self._validate_points_for_setting(
-            self.rviz_points + [point],
-            f"RViz mission point {point.point_name}",
-        )
-        if not valid:
-            self._warn_safety(reason)
-            return
-
         self.rviz_points.append(point)
         self.get_logger().info(
             f"Added RViz mission point {point.point_name} at ({point.x:.2f}, {point.y:.2f})"
@@ -226,39 +207,11 @@ class MissionManager(Node):
             max_y=max(first_y, y),
         )
         self.inspection_regions.append(region)
-        self._recompute_region_preview()
-        if self.region_generation_error is not None:
-            self.inspection_regions.pop()
-            message = f"Inspection region {region.name} rejected: {self.region_generation_error}"
-            self._warn_safety(message)
-            self._recompute_region_preview()
-            self._publish_rviz_plan_visuals()
-            return
-        if not self.region_preview_points:
-            self.inspection_regions.pop()
-            message = (
-                f"Inspection region {region.name} rejected: no safe sweep waypoint can be generated. "
-                f"Check region_margin={self.region_margin:.2f}m."
-            )
-            self._warn_safety(message)
-            self._recompute_region_preview()
-            self._publish_rviz_plan_visuals()
-            return
-        valid, reason = self._validate_points_for_setting(
-            self.region_preview_points,
-            f"Inspection region {region.name}",
-        )
-        if not valid:
-            self.inspection_regions.pop()
-            self._warn_safety(reason)
-            self._recompute_region_preview()
-            self._publish_rviz_plan_visuals()
-            return
-
         self.get_logger().info(
             f"Added inspection region {region.name}: "
             f"({region.min_x:.2f}, {region.min_y:.2f}) to ({region.max_x:.2f}, {region.max_y:.2f})"
         )
+        self._recompute_region_preview()
         self._publish_rviz_plan_visuals()
 
     def _goal_pose_cb(self, msg):
@@ -399,33 +352,6 @@ class MissionManager(Node):
             self.sweep_spacing,
             self.region_margin,
         )
-
-    def _validate_points_for_setting(self, points, context):
-        if not self.have_map_pose:
-            return (
-                False,
-                f"{context} rejected: AMCL pose unavailable. Set the initial pose before adding mission points.",
-            )
-        if not self.have_map or self.map_msg is None:
-            return False, f"{context} rejected: no /map data has been received."
-
-        validation = validate_mission_points(
-            self.map_msg,
-            (self.current_map_pose["x"], self.current_map_pose["y"]),
-            points,
-        )
-        if not validation.valid:
-            return False, f"{context} rejected: {validation.message}"
-        return True, validation.message
-
-    def _publish_mission_status(self, message, safety=False):
-        msg = String()
-        msg.data = f"[SAFETY] {message}" if safety else message
-        self.mission_status_pub.publish(msg)
-
-    def _warn_safety(self, message):
-        self.get_logger().warn(message)
-        self._publish_mission_status(message, safety=True)
 
     @staticmethod
     def _sweep_positions(start, end, spacing):
@@ -749,13 +675,6 @@ class MissionManager(Node):
         self._publish_zero_cmd()
         aborted = []
         errors = []
-        mission_was_active = self.mission_active
-        self.mission_run_id += 1
-
-        if self.mission_wait_timer is not None:
-            self._clear_mission_wait_timer()
-            aborted.append("mission wait")
-
         if self.goal_handle is not None:
             try:
                 self.goal_handle.cancel_goal_async()
@@ -764,11 +683,7 @@ class MissionManager(Node):
             else:
                 aborted.append("mission")
             self.goal_handle = None
-
-        if mission_was_active and not aborted:
-            aborted.append("mission")
-        self.mission_active = False
-        self._clear_mission_state()
+            self.mission_active = False
 
         if self.direct_goal_handle is not None:
             try:
@@ -790,7 +705,6 @@ class MissionManager(Node):
             response.success = True
             response.message = f"Abort requested for {', '.join(aborted)} and stop command sent"
             self.get_logger().warn(response.message)
-            self._publish_mission_status(response.message)
             return response
 
         self.mission_active = False
@@ -798,7 +712,6 @@ class MissionManager(Node):
         response.success = True
         response.message = "No active mission. Stop command sent"
         self.get_logger().warn(response.message)
-        self._publish_mission_status(response.message)
         return response
 
     def _handle_start_navigation(self, request, response):
@@ -850,14 +763,10 @@ class MissionManager(Node):
             response.message = "No /map data received"
             return response
 
-        if not self.nav_to_pose_client.wait_for_server(timeout_sec=2.0):
+        if not self.nav_client.wait_for_server(timeout_sec=2.0):
             response.success = False
-            response.message = "Nav2 action server /navigate_to_pose is not ready"
+            response.message = "Nav2 action server /navigate_through_poses is not ready"
             return response
-
-        pause_sec = self._clamp_waypoint_pause(
-            getattr(request, "waypoint_pause_sec", self.DEFAULT_WAYPOINT_PAUSE_SEC)
-        )
 
         validation = validate_mission_points(
             self.map_msg,
@@ -871,14 +780,18 @@ class MissionManager(Node):
             else:
                 response.message = validation.message
             self.get_logger().warn(f"Mission request rejected: {response.message}")
-            self._publish_mission_status(response.message, safety=True)
             return response
 
         ordered_points = list(points)
-        if not self._start_sequential_mission(ordered_points, source, pause_sec):
-            response.success = False
-            response.message = "Failed to start sequential mission"
-            return response
+
+        goal = NavigateThroughPoses.Goal()
+        goal.poses = [self._inspection_point_to_pose(point) for point in ordered_points]
+
+        send_goal_future = self.nav_client.send_goal_async(
+            goal, feedback_callback=self._feedback_cb
+        )
+        send_goal_future.add_done_callback(self._goal_response_cb)
+        self.mission_active = True
 
         names = " -> ".join(point.point_name for point in ordered_points[:12])
         if len(ordered_points) > 12:
@@ -886,16 +799,12 @@ class MissionManager(Node):
         response.success = True
         if source == "region":
             response.message = (
-                f"Sequential region inspection mission started with {len(ordered_points)} sweep waypoint(s) "
-                f"from {len(self.inspection_regions)} region(s), pause={pause_sec:.1f}s: {names}"
+                f"Region inspection mission sent with {len(ordered_points)} sweep waypoint(s) "
+                f"from {len(self.inspection_regions)} region(s): {names}"
             )
         else:
-            response.message = (
-                f"Sequential mission started with {len(ordered_points)} points from {source}, "
-                f"pause={pause_sec:.1f}s: {names}"
-            )
+            response.message = f"Mission goal sent with {len(ordered_points)} points from {source}: {names}"
         self.get_logger().info(response.message)
-        self._publish_mission_status(response.message)
         return response
 
     def _inspection_point_to_pose(self, point):
@@ -905,212 +814,48 @@ class MissionManager(Node):
     def _make_inspection_point(name, x, y, theta):
         return make_inspection_point(name, x, y, theta)
 
-    def _clamp_waypoint_pause(self, value):
-        try:
-            pause_sec = float(value)
-        except (TypeError, ValueError):
-            pause_sec = self.DEFAULT_WAYPOINT_PAUSE_SEC
-        if not math.isfinite(pause_sec):
-            pause_sec = self.DEFAULT_WAYPOINT_PAUSE_SEC
-        return max(0.0, min(self.MAX_WAYPOINT_PAUSE_SEC, pause_sec))
-
-    def _start_sequential_mission(self, ordered_points, source, pause_sec):
-        self._clear_mission_wait_timer()
-        self.goal_handle = None
-        self.mission_points = list(ordered_points)
-        self.mission_index = 0
-        self.mission_source = source
-        self.mission_run_id += 1
-        self.mission_waypoint_pause_sec = pause_sec
-        self.last_mission_feedback_log_time = 0.0
-        self.mission_active = True
-        return self._send_current_mission_goal()
-
-    def _send_current_mission_goal(self):
-        if not self.mission_active:
-            return False
-        if self.mission_index >= len(self.mission_points):
-            self._finish_mission_success()
-            return True
-
-        point = self.mission_points[self.mission_index]
-        waypoint_number = self.mission_index + 1
-        total = len(self.mission_points)
-        run_id = self.mission_run_id
-
-        goal = NavigateToPose.Goal()
-        goal.pose = self._inspection_point_to_pose(point)
-        goal.behavior_tree = ""
-
-        try:
-            send_goal_future = self.nav_to_pose_client.send_goal_async(
-                goal,
-                feedback_callback=lambda feedback_msg, run_id=run_id, index=self.mission_index: (
-                    self._mission_feedback_cb(feedback_msg, run_id, index)
-                ),
-            )
-        except Exception as exc:
-            self._finish_mission_failed(f"Failed to send mission waypoint {waypoint_number}/{total}: {exc}")
-            return False
-
-        send_goal_future.add_done_callback(
-            lambda future, run_id=run_id, index=self.mission_index: self._mission_goal_response_cb(
-                future, run_id, index
-            )
-        )
-        self.get_logger().info(
-            f"Mission waypoint {waypoint_number}/{total} sent to {point.point_name} "
-            f"({point.x:.2f}, {point.y:.2f}, {math.degrees(point.theta):.1f} deg)"
-        )
-        return True
-
-    def _mission_goal_response_cb(self, future, run_id, waypoint_index):
+    def _goal_response_cb(self, future):
         try:
             goal_handle = future.result()
         except Exception as exc:
-            if self._is_current_mission_goal(run_id, waypoint_index):
-                self._finish_mission_failed(
-                    f"Failed to send mission waypoint {waypoint_index + 1}/{len(self.mission_points)}: {exc}"
-                )
-            return
-
-        if not self._is_current_mission_goal(run_id, waypoint_index):
-            if goal_handle.accepted:
-                try:
-                    goal_handle.cancel_goal_async()
-                except Exception as exc:
-                    self.get_logger().warn(f"Failed to cancel stale mission waypoint goal: {exc}")
+            self.mission_active = False
+            self.get_logger().error(f"Failed to send mission goal: {exc}")
             return
 
         if not goal_handle.accepted:
-            self._finish_mission_failed(
-                f"Mission waypoint {waypoint_index + 1}/{len(self.mission_points)} was rejected by Nav2"
-            )
+            self.mission_active = False
+            self.get_logger().error("Mission goal was rejected by Nav2")
             return
 
         self.goal_handle = goal_handle
-        self.get_logger().info(
-            f"Mission waypoint {waypoint_index + 1}/{len(self.mission_points)} accepted by Nav2"
-        )
+        self.get_logger().info("Mission accepted by Nav2")
         result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(
-            lambda future, handle=goal_handle, run_id=run_id, index=waypoint_index: self._mission_result_cb(
-                future, handle, run_id, index
-            )
-        )
+        result_future.add_done_callback(self._result_cb)
 
-    def _mission_feedback_cb(self, feedback_msg, run_id, waypoint_index):
-        if not self._is_current_mission_goal(run_id, waypoint_index):
-            return
-        now_sec = self.get_clock().now().nanoseconds / 1e9
-        if now_sec - self.last_mission_feedback_log_time < 2.0:
-            return
-        self.last_mission_feedback_log_time = now_sec
+    def _feedback_cb(self, feedback_msg):
         feedback = feedback_msg.feedback
         self.get_logger().info(
-            f"Mission waypoint {waypoint_index + 1}/{len(self.mission_points)} feedback: "
+            f"Mission feedback: {feedback.number_of_poses_remaining} poses remaining, "
             f"{feedback.distance_remaining:.2f} m left"
         )
 
-    def _mission_result_cb(self, future, goal_handle, run_id, waypoint_index):
-        if run_id != self.mission_run_id:
-            return
-        if goal_handle is not self.goal_handle:
-            return
-        if not self._is_current_mission_goal(run_id, waypoint_index):
-            return
-
+    def _result_cb(self, future):
         self.goal_handle = None
+        self.mission_active = False
         try:
-            result_msg = future.result()
-            result = result_msg.result
+            result = future.result().result
         except Exception as exc:
-            self._finish_mission_failed(f"Mission result retrieval failed: {exc}")
+            self.get_logger().error(f"Mission result retrieval failed: {exc}")
+            self._publish_zero_cmd()
             return
 
-        if result.error_code != NavigateToPose.Result.NONE:
-            point_name = self.mission_points[waypoint_index].point_name
-            self._finish_mission_failed(
-                f"Mission waypoint {waypoint_index + 1}/{len(self.mission_points)} "
-                f"({point_name}) failed with code {result.error_code}: {result.error_msg}"
+        if result.error_code == NavigateThroughPoses.Result.NONE:
+            self.get_logger().info("Mission completed successfully")
+        else:
+            self.get_logger().error(
+                f"Mission failed with code {result.error_code}: {result.error_msg}"
             )
-            return
-
-        self._publish_zero_cmd()
-        point_name = self.mission_points[waypoint_index].point_name
-        self.get_logger().info(
-            f"Mission waypoint {waypoint_index + 1}/{len(self.mission_points)} "
-            f"({point_name}) reached"
-        )
-
-        next_index = waypoint_index + 1
-        if next_index >= len(self.mission_points):
-            self._finish_mission_success()
-            return
-
-        self.mission_index = next_index
-        next_point = self.mission_points[self.mission_index]
-        pause_sec = self.mission_waypoint_pause_sec
-        self.get_logger().info(
-            f"Waiting {pause_sec:.1f} s before planning to "
-            f"mission waypoint {self.mission_index + 1}/{len(self.mission_points)} "
-            f"({next_point.point_name})"
-        )
-        if pause_sec <= 0.0:
-            self._send_current_mission_goal()
-            return
-
-        self._clear_mission_wait_timer()
-        self.mission_wait_timer = self.create_timer(
-            pause_sec,
-            self._mission_wait_complete_cb,
-        )
-
-    def _mission_wait_complete_cb(self):
-        self._clear_mission_wait_timer()
-        if not self.mission_active:
-            return
-        self._send_current_mission_goal()
-
-    def _is_current_mission_goal(self, run_id, waypoint_index):
-        return (
-            self.mission_active
-            and run_id == self.mission_run_id
-            and waypoint_index == self.mission_index
-        )
-
-    def _clear_mission_wait_timer(self):
-        timer = self.mission_wait_timer
-        if timer is None:
-            return
-        self.mission_wait_timer = None
-        timer.cancel()
-        self.destroy_timer(timer)
-
-    def _clear_mission_state(self):
-        self.mission_points = []
-        self.mission_index = 0
-        self.mission_source = ""
-        self.mission_waypoint_pause_sec = self.DEFAULT_WAYPOINT_PAUSE_SEC
-        self.last_mission_feedback_log_time = 0.0
-
-    def _finish_mission_success(self):
-        self.goal_handle = None
-        self.mission_active = False
-        self._clear_mission_wait_timer()
-        self._publish_zero_cmd()
-        self.get_logger().info("Mission completed successfully")
-        self._publish_mission_status("Mission completed successfully")
-        self._clear_mission_state()
-
-    def _finish_mission_failed(self, message):
-        self.goal_handle = None
-        self.mission_active = False
-        self._clear_mission_wait_timer()
-        self._publish_zero_cmd()
-        self.get_logger().error(message)
-        self._publish_mission_status(message, safety=True)
-        self._clear_mission_state()
+            self._publish_zero_cmd()
 
     def _direct_goal_response_cb(self, future):
         try:
@@ -1167,7 +912,6 @@ class MissionManager(Node):
             self.goal_handle.cancel_goal_async()
         if self.direct_goal_handle is not None:
             self.direct_goal_handle.cancel_goal_async()
-        self._clear_mission_wait_timer()
         super().destroy_node()
 
     @staticmethod

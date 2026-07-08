@@ -54,4 +54,3 @@ ros2 topic hz /scan
 # 查看 /cmd_vel 话题（速度指令）
 ros2 topic echo /cmd_vel --once
 ```
-

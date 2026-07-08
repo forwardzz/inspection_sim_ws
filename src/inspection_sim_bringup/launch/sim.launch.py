@@ -132,7 +132,6 @@ def generate_launch_description():
             arguments=[
                 "/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan",
                 "/sim/imu/data_raw@sensor_msgs/msg/Imu[gz.msgs.IMU",
-                "/wheel_odom@nav_msgs/msg/Odometry[gz.msgs.Odometry",
             ],
         ),
 

@@ -4,11 +4,11 @@
 
 ## 功能
 
-- Gazebo Sim 中加载履带小车、激光雷达、IMU 和轮速/编码器里程计。
-- 通过 `ros_gz_bridge` 桥接 `/scan`、`/sim/imu/data_raw`、`/wheel_odom`、`/clock` 和 `/cmd_vel`。
-- 使用 `rf2o_laser_odometry` 和 `robot_localization` EKF 融合 `/laser_odom`、`/wheel_odom`、`/imu/data_raw` 生成 `/odom`。
+- Gazebo Sim 中加载履带小车、激光雷达和 IMU。
+- 通过 `ros_gz_bridge` 桥接 `/scan`、`/sim/imu/data_raw`、`/clock` 和 `/cmd_vel`。
+- 使用 `rf2o_laser_odometry` 和 `robot_localization` EKF 生成 `/odom`。
 - 使用 `slam_toolbox` 建图，使用 Nav2 进行 AMCL 定位和路径导航。
-- 提供 PyQt5 本机控制面板，支持启动仿真、建图、导航、保存地图、手动遥控、可调停留时间、巡检点/区域任务和主机状态监控。
+- 提供 PyQt5 本机控制面板，支持启动仿真、建图、导航、保存地图、手动遥控和巡检点/区域任务。
 
 ## 实现路径
 
