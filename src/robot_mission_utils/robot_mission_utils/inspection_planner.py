@@ -200,16 +200,16 @@ def _concat_segments(order_idx: Sequence[int], pairwise: PairwisePaths) -> Optio
 
 def _pick_final_path(raw_path: List[Point], ordered_points: List[Point], planning_map, base_map, smooth: bool) -> Optional[List[Point]]:
     required = set(ordered_points)
-    if not validate_path_segments(raw_path, base_map):
-        if not validate_path_segments(raw_path, planning_map):
+    if not validate_path_segments(raw_path, planning_map):
+        if not validate_path_segments(raw_path, base_map):
             return None
     if not smooth:
         return raw_path if required.issubset(set(raw_path)) else None
 
-    smoothed = smooth_path(raw_path, base_map, required_points=ordered_points)
-    if validate_path_segments(smoothed, base_map) and required.issubset(set(smoothed)):
+    smoothed = smooth_path(raw_path, planning_map, required_points=ordered_points)
+    if validate_path_segments(smoothed, planning_map) and required.issubset(set(smoothed)):
         return smoothed
-    if validate_path_segments(raw_path, base_map) and required.issubset(set(raw_path)):
+    if validate_path_segments(raw_path, planning_map) and required.issubset(set(raw_path)):
         return raw_path
     return raw_path if required.issubset(set(raw_path)) else None
 
