@@ -59,6 +59,8 @@ private:
     double obstacle_cost{0.0};
     double twirling_cost{0.0};
     double oscillation_cost{0.0};
+    double linear_velocity_change_cost{0.0};
+    double angular_velocity_change_cost{0.0};
     std::vector<geometry_msgs::msg::Pose2D> poses;
   };
 
@@ -101,6 +103,9 @@ private:
   double distanceToPath(double x, double y, const nav_msgs::msg::Path & path) const;
   double distanceToPose(double x, double y, const geometry_msgs::msg::PoseStamped & pose) const;
   double yawFromPose(const geometry_msgs::msg::PoseStamped & pose) const;
+  double pathHeadingError(
+    const geometry_msgs::msg::PoseStamped & robot_pose,
+    const nav_msgs::msg::Path & local_plan) const;
   double normalizeCostmapCost(double cost) const;
   double getGoalPositionTolerance(nav2_core::GoalChecker * goal_checker) const;
   double getGoalYawTolerance(nav2_core::GoalChecker * goal_checker) const;
@@ -136,6 +141,7 @@ private:
   double speed_limit_{0.0};
   double last_cmd_vx_{0.0};
   double last_cmd_wz_{0.0};
+  bool rotating_to_path_{false};
   geometry_msgs::msg::Pose2D oscillation_reset_pose_;
   bool have_oscillation_reset_pose_{false};
 
@@ -172,7 +178,12 @@ private:
   double twirling_scale_{0.2};
   double oscillation_scale_{8.0};
   double prefer_forward_scale_{8.0};
+  double linear_velocity_change_scale_{2.0};
+  double angular_velocity_change_scale_{0.5};
   double forward_point_distance_{0.25};
+  double path_heading_lookahead_{0.35};
+  double rotate_to_path_engage_angle_{0.60};
+  double rotate_to_path_disengage_angle_{0.25};
   double obstacle_cost_threshold_{254.0};
   bool allow_unknown_{false};
   double oscillation_reset_dist_{0.08};
@@ -183,8 +194,8 @@ private:
   double rotate_to_goal_angular_vel_{0.35};
   double trans_stopped_velocity_{0.03};
   double theta_stopped_velocity_{0.05};
-  double min_approach_vel_x_{0.04};
-  double min_dwa_window_vel_x_{0.06};
+  double min_approach_vel_x_{0.03};
+  double min_dwa_window_vel_x_{0.03};
   double approach_slowdown_distance_{0.35};
 };
 

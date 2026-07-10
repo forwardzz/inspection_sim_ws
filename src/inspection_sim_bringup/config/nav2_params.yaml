@@ -110,7 +110,12 @@ controller_server:
       twirling_scale: 0.2
       oscillation_scale: 4.0
       prefer_forward_scale: 8.0
+      linear_velocity_change_scale: 2.0
+      angular_velocity_change_scale: 0.5
       forward_point_distance: 0.25
+      path_heading_lookahead: 0.35
+      rotate_to_path_engage_angle: 0.60
+      rotate_to_path_disengage_angle: 0.25
       obstacle_cost_threshold: 254.0
       allow_unknown: false
       oscillation_reset_dist: 0.08
@@ -121,8 +126,8 @@ controller_server:
       rotate_to_goal_angular_vel: 0.35
       trans_stopped_velocity: 0.03
       theta_stopped_velocity: 0.05
-      min_approach_vel_x: 0.05
-      min_dwa_window_vel_x: 0.05
+      min_approach_vel_x: 0.03
+      min_dwa_window_vel_x: 0.03
       approach_slowdown_distance: 0.50
 
 local_costmap:

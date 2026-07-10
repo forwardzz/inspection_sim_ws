@@ -81,6 +81,7 @@ void DWAController::cleanup()
   local_plan_pub_.reset();
   collision_checker_.reset();
   global_plan_ = nav_msgs::msg::Path();
+  rotating_to_path_ = false;
   configured_ = false;
   active_ = false;
 }
@@ -205,9 +206,16 @@ geometry_msgs::msg::TwistStamped DWAController::computeVelocityCommands(
       oscillation_reset_pose_.x = robot_pose.pose.position.x;
       oscillation_reset_pose_.y = robot_pose.pose.position.y;
       oscillation_reset_pose_.theta = yawFromPose(robot_pose);
-      last_cmd_vx_ = 0.0;
-      last_cmd_wz_ = 0.0;
     }
+  }
+
+  const double path_heading_error = pathHeadingError(robot_pose, local_plan);
+  if (rotating_to_path_) {
+    if (std::abs(path_heading_error) <= rotate_to_path_disengage_angle_) {
+      rotating_to_path_ = false;
+    }
+  } else if (std::abs(path_heading_error) >= rotate_to_path_engage_angle_) {
+    rotating_to_path_ = true;
   }
 
   std::vector<double> vx_samples = sampleLinearVelocities(velocity.linear.x);
@@ -241,7 +249,7 @@ geometry_msgs::msg::TwistStamped DWAController::computeVelocityCommands(
     const bool has_forward = std::any_of(
       vx_samples.begin(), vx_samples.end(), [](double v) {
         return v > 1e-6;
-    });
+      });
     if (!has_forward && effective_approach_max > 0.0) {
       const double dwa_floor = std::min(min_dwa_window_vel_x_, effective_max_vel_x);
       const double candidate = std::min(
@@ -259,32 +267,43 @@ geometry_msgs::msg::TwistStamped DWAController::computeVelocityCommands(
   size_t valid_trajectory_count = 0;
   size_t max_trajectory_poses = 0;
 
-  for (const double vx : vx_samples) {
-    for (const double wz : wz_samples) {
-      if (
-        goal_distance > xy_goal_tolerance &&
-        std::abs(vx) <= 1e-6 && std::abs(wz) < theta_stopped_velocity_)
-      {
-        continue;
-      }
+  auto consider_trajectory = [&](double vx, double wz) {
+    Trajectory trajectory;
+    if (!makeTrajectory(robot_pose, vx, wz, trajectory)) {
+      return;
+    }
+    ++trajectory_count;
+    max_trajectory_poses = std::max(max_trajectory_poses, trajectory.poses.size());
+    if (!scoreTrajectory(trajectory, local_plan, robot_pose, goal_pose)) {
+      return;
+    }
+    ++valid_trajectory_count;
+    if (
+      !found || trajectory.total_cost < best.total_cost ||
+      (std::abs(trajectory.total_cost - best.total_cost) < 1e-6 && trajectory.vx > best.vx))
+    {
+      best = trajectory;
+      found = true;
+    }
+  };
 
-      Trajectory trajectory;
-      if (!makeTrajectory(robot_pose, vx, wz, trajectory)) {
+  if (!rotating_to_path_) {
+    for (const double vx : vx_samples) {
+      if (vx <= 1e-6) {
         continue;
       }
-      ++trajectory_count;
-      max_trajectory_poses = std::max(max_trajectory_poses, trajectory.poses.size());
-      if (!scoreTrajectory(trajectory, local_plan, robot_pose, goal_pose)) {
+      for (const double wz : wz_samples) {
+        consider_trajectory(vx, wz);
+      }
+    }
+  }
+
+  if (rotating_to_path_ || !found) {
+    for (const double wz : wz_samples) {
+      if (std::abs(wz) < theta_stopped_velocity_) {
         continue;
       }
-      ++valid_trajectory_count;
-      if (
-        !found || trajectory.total_cost < best.total_cost ||
-        (std::abs(trajectory.total_cost - best.total_cost) < 1e-6 && trajectory.vx > best.vx))
-      {
-        best = trajectory;
-        found = true;
-      }
+      consider_trajectory(0.0, wz);
     }
   }
 
@@ -327,6 +346,7 @@ void DWAController::reset()
 {
   last_cmd_vx_ = 0.0;
   last_cmd_wz_ = 0.0;
+  rotating_to_path_ = false;
   have_oscillation_reset_pose_ = false;
 }
 
@@ -361,7 +381,12 @@ void DWAController::readParameters()
   declareParameter("twirling_scale", rclcpp::ParameterValue(0.2));
   declareParameter("oscillation_scale", rclcpp::ParameterValue(8.0));
   declareParameter("prefer_forward_scale", rclcpp::ParameterValue(8.0));
+  declareParameter("linear_velocity_change_scale", rclcpp::ParameterValue(2.0));
+  declareParameter("angular_velocity_change_scale", rclcpp::ParameterValue(0.5));
   declareParameter("forward_point_distance", rclcpp::ParameterValue(0.25));
+  declareParameter("path_heading_lookahead", rclcpp::ParameterValue(0.35));
+  declareParameter("rotate_to_path_engage_angle", rclcpp::ParameterValue(0.60));
+  declareParameter("rotate_to_path_disengage_angle", rclcpp::ParameterValue(0.25));
   declareParameter("obstacle_cost_threshold", rclcpp::ParameterValue(254.0));
   declareParameter("allow_unknown", rclcpp::ParameterValue(false));
   declareParameter("oscillation_reset_dist", rclcpp::ParameterValue(0.08));
@@ -372,8 +397,8 @@ void DWAController::readParameters()
   declareParameter("rotate_to_goal_angular_vel", rclcpp::ParameterValue(0.35));
   declareParameter("trans_stopped_velocity", rclcpp::ParameterValue(0.03));
   declareParameter("theta_stopped_velocity", rclcpp::ParameterValue(0.05));
-  declareParameter("min_approach_vel_x", rclcpp::ParameterValue(0.04));
-  declareParameter("min_dwa_window_vel_x", rclcpp::ParameterValue(0.06));
+  declareParameter("min_approach_vel_x", rclcpp::ParameterValue(0.03));
+  declareParameter("min_dwa_window_vel_x", rclcpp::ParameterValue(0.03));
   declareParameter("approach_slowdown_distance", rclcpp::ParameterValue(0.35));
 
   if (node_->has_parameter("controller_frequency")) {
@@ -409,7 +434,12 @@ void DWAController::readParameters()
   twirling_scale_ = getDouble("twirling_scale");
   oscillation_scale_ = getDouble("oscillation_scale");
   prefer_forward_scale_ = getDouble("prefer_forward_scale");
+  linear_velocity_change_scale_ = getDouble("linear_velocity_change_scale");
+  angular_velocity_change_scale_ = getDouble("angular_velocity_change_scale");
   forward_point_distance_ = getDouble("forward_point_distance");
+  path_heading_lookahead_ = getDouble("path_heading_lookahead");
+  rotate_to_path_engage_angle_ = getDouble("rotate_to_path_engage_angle");
+  rotate_to_path_disengage_angle_ = getDouble("rotate_to_path_disengage_angle");
   obstacle_cost_threshold_ = getDouble("obstacle_cost_threshold");
   allow_unknown_ = getBool("allow_unknown");
   oscillation_reset_dist_ = getDouble("oscillation_reset_dist");
@@ -429,6 +459,12 @@ void DWAController::readParameters()
   angular_sim_granularity_ = std::max(0.01, angular_sim_granularity_);
   controller_frequency_ = std::max(1.0, controller_frequency_);
   max_robot_pose_search_dist_ = std::max(0.1, max_robot_pose_search_dist_);
+  path_heading_lookahead_ = std::max(0.05, path_heading_lookahead_);
+  rotate_to_path_engage_angle_ = std::max(0.01, rotate_to_path_engage_angle_);
+  rotate_to_path_disengage_angle_ = clamp(
+    rotate_to_path_disengage_angle_, 0.0, rotate_to_path_engage_angle_);
+  linear_velocity_change_scale_ = std::max(0.0, linear_velocity_change_scale_);
+  angular_velocity_change_scale_ = std::max(0.0, angular_velocity_change_scale_);
   timing_warn_ms_ = std::max(1.0, timing_warn_ms_);
 }
 
@@ -787,6 +823,8 @@ bool DWAController::scoreTrajectory(
     std::abs(trajectory.vx) > trans_stopped_velocity_ &&
     last_cmd_vx_ * trajectory.vx < 0.0;
   trajectory.oscillation_cost = (angular_flip || linear_flip) ? 1.0 : 0.0;
+  trajectory.linear_velocity_change_cost = std::abs(trajectory.vx - last_cmd_vx_);
+  trajectory.angular_velocity_change_cost = std::abs(trajectory.wz - last_cmd_wz_);
 
   const double prefer_forward_cost = trajectory.vx < 0.0 ? std::abs(trajectory.vx) : 0.0;
 
@@ -798,6 +836,8 @@ bool DWAController::scoreTrajectory(
     occdist_scale_ * trajectory.obstacle_cost +
     twirling_scale_ * trajectory.twirling_cost +
     oscillation_scale_ * trajectory.oscillation_cost +
+    linear_velocity_change_scale_ * trajectory.linear_velocity_change_cost +
+    angular_velocity_change_scale_ * trajectory.angular_velocity_change_cost +
     prefer_forward_scale_ * prefer_forward_cost;
 
   return std::isfinite(trajectory.total_cost);
@@ -842,6 +882,31 @@ double DWAController::distanceToPose(
 double DWAController::yawFromPose(const geometry_msgs::msg::PoseStamped & pose) const
 {
   return tf2::getYaw(pose.pose.orientation);
+}
+
+double DWAController::pathHeadingError(
+  const geometry_msgs::msg::PoseStamped & robot_pose,
+  const nav_msgs::msg::Path & local_plan) const
+{
+  const double robot_x = robot_pose.pose.position.x;
+  const double robot_y = robot_pose.pose.position.y;
+  const geometry_msgs::msg::PoseStamped * target = &local_plan.poses.back();
+  for (const auto & plan_pose : local_plan.poses) {
+    if (hypot2(
+        plan_pose.pose.position.x - robot_x,
+        plan_pose.pose.position.y - robot_y) >= path_heading_lookahead_)
+    {
+      target = &plan_pose;
+      break;
+    }
+  }
+
+  const double dx = target->pose.position.x - robot_x;
+  const double dy = target->pose.position.y - robot_y;
+  if (hypot2(dx, dy) < 1e-6) {
+    return 0.0;
+  }
+  return angles::shortest_angular_distance(yawFromPose(robot_pose), std::atan2(dy, dx));
 }
 
 double DWAController::normalizeCostmapCost(double cost) const
