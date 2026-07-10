@@ -1,4 +1,5 @@
 from glob import glob
+import json
 import math
 import os
 import re
@@ -166,6 +167,17 @@ class MainWindow(QMainWindow):
         workspace_default = node.declare_parameter("workspace_path", DEFAULT_WORKSPACE_PATH).value
         map_default = node.declare_parameter("map_path", DEFAULT_MAP_PATH).value
         ros_setup_default = node.declare_parameter("ros_setup_path", DEFAULT_ROS_SETUP_PATH).value
+        scene_catalog_path = node.declare_parameter("scene_catalog_path", "").value
+
+        self.scenes = []
+        self.bringup_share = self._find_bringup_share()
+        if scene_catalog_path and os.path.isfile(scene_catalog_path):
+            self.scenes = self._load_scene_catalog(scene_catalog_path)
+        elif self.bringup_share:
+            catalog_default = os.path.join(self.bringup_share, "scenes", "scene_catalog.json")
+            if os.path.isfile(catalog_default):
+                self.scenes = self._load_scene_catalog(catalog_default)
+        saved_scene = self.settings.value("current_scene", "")
 
         self.launch_manager = LaunchManager(workspace_default, ros_setup_default)
         self.launch_manager.log_line.connect(self.append_log)
@@ -194,6 +206,7 @@ class MainWindow(QMainWindow):
         self.ros_setup_edit = QLineEdit(
             self.settings.value("ros_setup_path", ros_setup_default)
         )
+        self.scene_combo = QComboBox()
         self.map_combo = QComboBox()
         self.map_combo.setEditable(True)
         self.map_combo.addItem(self.settings.value("map_path", map_default))
@@ -246,6 +259,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_style()
         self._connect()
+
+        self._populate_scene_combo()
 
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._refresh_status)
@@ -314,17 +329,24 @@ class MainWindow(QMainWindow):
         browse_setup.clicked.connect(self._browse_ros_setup)
         layout.addWidget(browse_setup, 1, 4)
 
-        layout.addWidget(QLabel("地图 YAML"), 2, 0)
-        layout.addWidget(self.map_combo, 2, 1, 1, 2)
+        layout.addWidget(QLabel("仿真场景"), 2, 0)
+        layout.addWidget(self.scene_combo, 2, 1, 1, 2)
+        refresh_scenes_btn = QPushButton("刷新场景")
+        refresh_scenes_btn.clicked.connect(self.refresh_scenes)
+        layout.addWidget(refresh_scenes_btn, 2, 3)
+        layout.addWidget(QLabel(""), 2, 4)
+
+        layout.addWidget(QLabel("地图 YAML"), 3, 0)
+        layout.addWidget(self.map_combo, 3, 1, 1, 2)
         refresh_maps = QPushButton("刷新地图")
         refresh_maps.clicked.connect(self.refresh_maps)
-        layout.addWidget(refresh_maps, 2, 3)
+        layout.addWidget(refresh_maps, 3, 3)
         browse_map = QPushButton("浏览")
         browse_map.clicked.connect(self._browse_map)
-        layout.addWidget(browse_map, 2, 4)
+        layout.addWidget(browse_map, 3, 4)
 
-        layout.addWidget(self.use_rviz_check, 3, 1)
-        layout.addWidget(self.headless_check, 3, 2)
+        layout.addWidget(self.use_rviz_check, 4, 1)
+        layout.addWidget(self.headless_check, 4, 2)
 
         buttons = QHBoxLayout()
         for text, handler in [
@@ -337,7 +359,7 @@ class MainWindow(QMainWindow):
             button = QPushButton(text)
             button.clicked.connect(handler)
             buttons.addWidget(button)
-        layout.addLayout(buttons, 4, 0, 1, 5)
+        layout.addLayout(buttons, 5, 0, 1, 5)
         return group
 
     def _build_pose_group(self):
@@ -395,6 +417,16 @@ class MainWindow(QMainWindow):
         region.addWidget(load_regions)
         region.addWidget(clear_regions)
         layout.addLayout(region)
+
+        undo_row = QHBoxLayout()
+        undo_region = QPushButton("撤销区域")
+        undo_region.clicked.connect(self.undo_last_region)
+        undo_point_btn = QPushButton("撤销点位")
+        undo_point_btn.clicked.connect(self.undo_last_rviz_point)
+        undo_row.addWidget(undo_region)
+        undo_row.addWidget(undo_point_btn)
+        undo_row.addStretch(1)
+        layout.addLayout(undo_row)
 
         self.mission_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.mission_label)
@@ -568,16 +600,42 @@ class MainWindow(QMainWindow):
 
     def start_sim(self):
         self._apply_launch_paths()
+        scene = self._current_scene()
+        world_path = self._scene_world_path(scene) if scene else None
+        world_name = scene.get("world_name") if scene else None
+        spawn_x = float(scene.get("spawn_x", 0.0)) if scene else 0.0
+        spawn_y = float(scene.get("spawn_y", 0.0)) if scene else 0.0
+        spawn_z = float(scene.get("spawn_z", 0.05)) if scene else 0.05
+        spawn_yaw = float(scene.get("spawn_yaw", 0.0)) if scene else 0.0
         self.launch_manager.start_sim(
             self.use_rviz_check.isChecked(),
             self.headless_check.isChecked(),
+            world=world_path,
+            world_name=world_name,
+            spawn_x=spawn_x,
+            spawn_y=spawn_y,
+            spawn_z=spawn_z,
+            spawn_yaw=spawn_yaw,
         )
 
     def start_mapping(self):
         self._apply_launch_paths()
+        scene = self._current_scene()
+        world_path = self._scene_world_path(scene) if scene else None
+        world_name = scene.get("world_name") if scene else None
+        spawn_x = float(scene.get("spawn_x", 0.0)) if scene else 0.0
+        spawn_y = float(scene.get("spawn_y", 0.0)) if scene else 0.0
+        spawn_z = float(scene.get("spawn_z", 0.05)) if scene else 0.05
+        spawn_yaw = float(scene.get("spawn_yaw", 0.0)) if scene else 0.0
         self.launch_manager.start_mapping(
             self.use_rviz_check.isChecked(),
             self.headless_check.isChecked(),
+            world=world_path,
+            world_name=world_name,
+            spawn_x=spawn_x,
+            spawn_y=spawn_y,
+            spawn_z=spawn_z,
+            spawn_yaw=spawn_yaw,
         )
 
     def start_navigation(self):
@@ -586,11 +644,49 @@ class MainWindow(QMainWindow):
         if not map_path:
             QMessageBox.warning(self, "缺少地图路径", "启动导航前需要设置地图 YAML。")
             return
+        scene = self._current_scene()
+        if scene:
+            recommended_map = os.path.join(
+                self.workspace_edit.text().strip() or DEFAULT_WORKSPACE_PATH,
+                "maps",
+                scene.get("map", ""),
+            )
+            if recommended_map and self._normalize_map_path(map_path) != recommended_map:
+                reply = QMessageBox.question(
+                    self,
+                    "地图不匹配",
+                    f"当前地图 ({os.path.basename(map_path)}) 与场景推荐地图 "
+                    f"({scene.get('map')}) 不一致。\n\n是否继续？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    return
         self._set_map_text(map_path)
+        world_path = self._scene_world_path(scene) if scene else None
+        world_name = scene.get("world_name") if scene else None
+        spawn_x = float(scene.get("spawn_x", 0.0)) if scene else 0.0
+        spawn_y = float(scene.get("spawn_y", 0.0)) if scene else 0.0
+        spawn_z = float(scene.get("spawn_z", 0.05)) if scene else 0.05
+        spawn_yaw = float(scene.get("spawn_yaw", 0.0)) if scene else 0.0
+        regions_path = self._scene_regions_path(scene) if scene else None
+        init_x = self.init_x_spin.value()
+        init_y = self.init_y_spin.value()
+        init_yaw = math.radians(self.init_yaw_spin.value())
         self.launch_manager.start_navigation(
             map_path,
             self.use_rviz_check.isChecked(),
             self.headless_check.isChecked(),
+            world=world_path,
+            world_name=world_name,
+            spawn_x=spawn_x,
+            spawn_y=spawn_y,
+            spawn_z=spawn_z,
+            spawn_yaw=spawn_yaw,
+            initial_pose_x=init_x,
+            initial_pose_y=init_y,
+            initial_pose_yaw=init_yaw,
+            regions=regions_path,
         )
 
     def save_map(self):
@@ -599,6 +695,24 @@ class MainWindow(QMainWindow):
         if not map_path:
             QMessageBox.warning(self, "缺少地图路径", "请先设置输出地图 YAML 路径。")
             return
+        scene = self._current_scene()
+        if scene:
+            recommended_map = os.path.join(
+                self.workspace_edit.text().strip() or DEFAULT_WORKSPACE_PATH,
+                "maps",
+                scene.get("map", ""),
+            )
+            if recommended_map and self._normalize_map_path(map_path) != recommended_map:
+                reply = QMessageBox.question(
+                    self,
+                    "地图路径不匹配",
+                    f"保存路径 ({os.path.basename(map_path)}) 与当前场景推荐地图 "
+                    f"({scene.get('map')}) 不一致。\n\n是否继续保存？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    return
         self._set_map_text(map_path)
         self.launch_manager.save_map(map_path)
 
@@ -673,6 +787,22 @@ class MainWindow(QMainWindow):
             self.ros.clear_inspection_regions_client,
             "清空区域",
             "[MISSION] clear regions",
+        )
+
+    def undo_last_region(self):
+        self.append_log("[MISSION] undo last region")
+        self.ros.call_service_async(
+            self.ros.undo_last_region_client,
+            Trigger.Request(),
+            lambda result, error: self._emit_service_result("撤销区域", result, error),
+        )
+
+    def undo_last_rviz_point(self):
+        self.append_log("[MISSION] undo last point")
+        self.ros.call_service_async(
+            self.ros.undo_last_point_client,
+            Trigger.Request(),
+            lambda result, error: self._emit_service_result("撤销点位", result, error),
         )
 
     def _call_region_trigger(self, client, title, log_line):
@@ -1004,6 +1134,86 @@ class MainWindow(QMainWindow):
         if os.path.basename(path) == path:
             return os.path.join(maps_dir, path)
         return path
+
+    def _find_bringup_share(self):
+        try:
+            return get_package_share_directory("inspection_sim_bringup")
+        except Exception:
+            return ""
+
+    def _load_scene_catalog(self, path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("scenes", [])
+        except Exception as e:
+            self.append_log(f"[SCENE] Failed to load catalog {path}: {e}")
+            return []
+
+    def refresh_scenes(self):
+        catalog_path = self._find_scene_catalog_path()
+        if not catalog_path or not os.path.isfile(catalog_path):
+            self.append_log("[SCENE] scene_catalog.json not found")
+            return
+        self.scenes = self._load_scene_catalog(catalog_path)
+        self._populate_scene_combo()
+
+    def _find_scene_catalog_path(self):
+        if self.bringup_share:
+            return os.path.join(self.bringup_share, "scenes", "scene_catalog.json")
+        return ""
+
+    def _populate_scene_combo(self):
+        saved = self.settings.value("current_scene", "")
+        self.scene_combo.blockSignals(True)
+        self.scene_combo.clear()
+        for scene in self.scenes:
+            self.scene_combo.addItem(scene["name"])
+        if saved:
+            idx = self.scene_combo.findText(saved)
+            if idx >= 0:
+                self.scene_combo.setCurrentIndex(idx)
+        if self.scene_combo.count() > 0:
+            self.scene_combo.currentIndexChanged.connect(self._on_scene_changed)
+            self._on_scene_changed(self.scene_combo.currentIndex())
+        self.scene_combo.blockSignals(False)
+
+    def _current_scene(self):
+        idx = self.scene_combo.currentIndex()
+        if 0 <= idx < len(self.scenes):
+            return self.scenes[idx]
+        return None
+
+    def _on_scene_changed(self, index):
+        if index < 0 or index >= len(self.scenes):
+            return
+        scene = self.scenes[index]
+        self.init_x_spin.setValue(float(scene.get("initial_pose_x", 0.0)))
+        self.init_y_spin.setValue(float(scene.get("initial_pose_y", 0.0)))
+        self.init_yaw_spin.setValue(float(scene.get("initial_pose_yaw", 0.0)))
+        self.settings.setValue("current_scene", scene["name"])
+        recommended_map = os.path.join(
+            self.workspace_edit.text().strip() or DEFAULT_WORKSPACE_PATH,
+            "maps",
+            scene.get("map", ""),
+        )
+        if recommended_map and os.path.isfile(recommended_map):
+            current = self._map_text()
+            if self._normalize_map_path(current) != recommended_map:
+                self._set_map_text(recommended_map)
+        else:
+            self.append_log(
+                f"[SCENE] 推荐地图不存在: {recommended_map}. 建议通过建图生成并保存."
+            )
+
+    def _scene_world_path(self, scene):
+        if not self.bringup_share or not scene:
+            return None
+        return os.path.join(self.bringup_share, "worlds", scene.get("world", ""))
+
+    def _scene_regions_path(self, scene):
+        workspace = self.workspace_edit.text().strip() or DEFAULT_WORKSPACE_PATH
+        return os.path.join(workspace, "maps", scene.get("regions", ""))
 
     def closeEvent(self, event):
         self.settings.sync()

@@ -18,6 +18,7 @@ from robot_mission_utils.inspection_planner import (
     preview_current_order,
     validate_mission_points,
 )
+from robot_mission_utils.grid_map import GridMap
 from robot_monitor_interfaces.msg import InspectionPoint
 from robot_monitor_interfaces.srv import ConfirmInspectionPoints, Localize, StartNavigation
 
@@ -44,6 +45,8 @@ from .robot_config import (
     SERVICE_SAVE_INSPECTION_REGIONS,
     SERVICE_SET_REGION_MODE,
     SERVICE_START_NAVIGATION,
+    SERVICE_UNDO_LAST_INSPECTION_REGION,
+    SERVICE_UNDO_LAST_RVIZ_POINT,
     TOPIC_AMCL_POSE,
     TOPIC_CLICKED_POINT,
     TOPIC_CMD_VEL_NAV,
@@ -147,6 +150,16 @@ class MissionManager(Node):
             self._handle_load_inspection_regions,
         )
         self.create_service(Trigger, SERVICE_ABORT_MISSION, self._handle_abort_mission)
+        self.create_service(
+            Trigger,
+            SERVICE_UNDO_LAST_INSPECTION_REGION,
+            self._handle_undo_last_inspection_region,
+        )
+        self.create_service(
+            Trigger,
+            SERVICE_UNDO_LAST_RVIZ_POINT,
+            self._handle_undo_last_rviz_point,
+        )
 
         self.nav_to_pose_client = ActionClient(self, NavigateToPose, ACTION_NAVIGATE_TO_POSE)
         self.mission_position_timer = self.create_timer(
@@ -165,11 +178,13 @@ class MissionManager(Node):
         self.current_map_pose["y"] = msg.pose.pose.position.y
         self.current_map_pose["theta"] = quat_to_yaw(msg.pose.pose.orientation)
         self.have_map_pose = True
-        if self.rviz_points and not self.mission_active:
-            now_sec = self.get_clock().now().nanoseconds / 1e9
-            if now_sec - self.last_rviz_recompute_time >= self.rviz_recompute_throttle_sec:
-                self.last_rviz_recompute_time = now_sec
+        now_sec = self.get_clock().now().nanoseconds / 1e9
+        if now_sec - self.last_rviz_recompute_time >= self.rviz_recompute_throttle_sec:
+            self.last_rviz_recompute_time = now_sec
+            if self.rviz_points and not self.mission_active:
                 self._recompute_rviz_plan()
+            elif self.inspection_regions and self.have_map and self.map_msg is not None:
+                self._publish_rviz_plan_visuals()
 
     def _map_cb(self, msg):
         self.have_map = True
@@ -249,10 +264,7 @@ class MissionManager(Node):
             self._recompute_region_preview()
             self._publish_rviz_plan_visuals()
             return
-        valid, reason = self._validate_points_for_setting(
-            self.region_preview_points,
-            f"Inspection region {region.name}",
-        )
+        valid, reason = self._validate_region_entry(region)
         if not valid:
             self.inspection_regions.pop()
             self._warn_safety(reason)
@@ -423,6 +435,44 @@ class MissionManager(Node):
             return False, f"{context} rejected: {validation.message}"
         return True, validation.message
 
+    def _validate_region_entry(self, region):
+        width = region.max_x - region.min_x
+        height = region.max_y - region.min_y
+        min_dim = max(self.sweep_spacing + self.region_margin * 2.0, 0.10)
+        if width < min_dim or height < min_dim:
+            return (
+                False,
+                f"Region {region.name} rejected: dimensions ({width:.2f}x{height:.2f}m) "
+                f"are too small. Minimum is {min_dim:.2f}m per side.",
+            )
+        if not self.have_map or self.map_msg is None:
+            self.get_logger().info(
+                f"Region {region.name} accepted without map validation (no /map yet)"
+            )
+            return True, "Region added (map not yet available)"
+        grid_map = GridMap.from_occupancy_grid(self.map_msg)
+        corners = [
+            (region.min_x, region.min_y),
+            (region.max_x, region.min_y),
+            (region.max_x, region.max_y),
+            (region.min_x, region.max_y),
+        ]
+        for cx, cy in corners:
+            gx, gy = grid_map.world_to_grid(cx, cy)
+            if not grid_map.in_bounds(gx, gy):
+                return (
+                    False,
+                    f"Region {region.name} rejected: corner ({cx:.2f}, {cy:.2f}) "
+                    f"is outside map bounds.",
+                )
+            if not grid_map.is_valid(gx, gy):
+                return (
+                    False,
+                    f"Region {region.name} rejected: corner ({cx:.2f}, {cy:.2f}) "
+                    f"is in an obstacle or unknown area.",
+                )
+        return True, f"Region {region.name} validated"
+
     def _publish_mission_status(self, message, safety=False):
         msg = String()
         msg.data = f"[SAFETY] {message}" if safety else message
@@ -448,8 +498,12 @@ class MissionManager(Node):
         marker_array.markers.append(delete_all)
 
         stamp = self.get_clock().now().to_msg()
+        next_marker_id = 1
+
         for index, point in enumerate(self.rviz_ordered_points, start=1):
-            marker_id = index * 3
+            marker_id = next_marker_id
+            next_marker_id += 2
+
             sphere = Marker()
             sphere.header.frame_id = FRAME_MAP
             sphere.header.stamp = stamp
@@ -478,87 +532,95 @@ class MissionManager(Node):
             text.type = Marker.TEXT_VIEW_FACING
             text.action = Marker.ADD
             text.pose.position.x = point.x
-            text.pose.position.y = point.y
-            text.pose.position.z = 0.28
+            text.pose.position.y = point.y + 0.10
+            text.pose.position.z = 0.35
             text.pose.orientation.w = 1.0
-            text.scale.z = 0.14
-            text.color.r = 0.16
-            text.color.g = 0.21
-            text.color.b = 0.25
+            text.scale.z = 0.20
+            text.color.r = 1.0
+            text.color.g = 0.85
+            text.color.b = 0.30
             text.color.a = 1.0
-            text.text = f"{index}:{point.point_name} ({math.degrees(point.theta):.0f}deg)"
+            text.text = str(index)
             marker_array.markers.append(text)
 
-            arrow = Marker()
-            arrow.header.frame_id = FRAME_MAP
-            arrow.header.stamp = stamp
-            arrow.ns = "mission_heading"
-            arrow.id = marker_id + 2
-            arrow.type = Marker.ARROW
-            arrow.action = Marker.ADD
-            arrow.pose.position.x = point.x
-            arrow.pose.position.y = point.y
-            arrow.pose.position.z = 0.08
-            arrow.pose.orientation.z = math.sin(point.theta / 2.0)
-            arrow.pose.orientation.w = math.cos(point.theta / 2.0)
-            arrow.scale.x = 0.24
-            arrow.scale.y = 0.05
-            arrow.scale.z = 0.07
-            arrow.color.r = 0.16
-            arrow.color.g = 0.53
-            arrow.color.b = 0.90
-            arrow.color.a = 0.95
-            marker_array.markers.append(arrow)
-
         if self.pending_region_corner is not None:
-            corner = Marker()
-            corner.header.frame_id = FRAME_MAP
-            corner.header.stamp = stamp
-            corner.ns = "inspection_region_pending"
-            corner.id = 9000
-            corner.type = Marker.SPHERE
-            corner.action = Marker.ADD
-            corner.pose.position.x = self.pending_region_corner[0]
-            corner.pose.position.y = self.pending_region_corner[1]
-            corner.pose.position.z = 0.08
-            corner.pose.orientation.w = 1.0
-            corner.scale.x = 0.18
-            corner.scale.y = 0.18
-            corner.scale.z = 0.18
-            corner.color.r = 0.47
-            corner.color.g = 0.24
-            corner.color.b = 0.72
-            corner.color.a = 0.95
-            marker_array.markers.append(corner)
+            corner_id = next_marker_id
+            next_marker_id += 3
 
+            region_index = len(self.inspection_regions) + 1
+            cx, cy = self.pending_region_corner
+            corner_sphere = Marker()
+            corner_sphere.header.frame_id = FRAME_MAP
+            corner_sphere.header.stamp = stamp
+            corner_sphere.ns = "inspection_region_pending"
+            corner_sphere.id = corner_id
+            corner_sphere.type = Marker.SPHERE
+            corner_sphere.action = Marker.ADD
+            corner_sphere.pose.position.x = cx
+            corner_sphere.pose.position.y = cy
+            corner_sphere.pose.position.z = 0.08
+            corner_sphere.pose.orientation.w = 1.0
+            corner_sphere.scale.x = 0.18
+            corner_sphere.scale.y = 0.18
+            corner_sphere.scale.z = 0.18
+            corner_sphere.color.r = 0.47
+            corner_sphere.color.g = 0.24
+            corner_sphere.color.b = 0.72
+            corner_sphere.color.a = 0.95
+            marker_array.markers.append(corner_sphere)
+
+            pending_label = Marker()
+            pending_label.header.frame_id = FRAME_MAP
+            pending_label.header.stamp = stamp
+            pending_label.ns = "inspection_region_pending"
+            pending_label.id = corner_id + 1
+            pending_label.type = Marker.TEXT_VIEW_FACING
+            pending_label.action = Marker.ADD
+            pending_label.pose.position.x = cx
+            pending_label.pose.position.y = cy + 0.20
+            pending_label.pose.position.z = 0.40
+            pending_label.pose.orientation.w = 1.0
+            pending_label.scale.z = 0.16
+            pending_label.color.r = 0.80
+            pending_label.color.g = 0.70
+            pending_label.color.b = 0.95
+            pending_label.color.a = 1.0
+            pending_label.text = f"\u533a\u57df {region_index} \u7b2c1\u89d2"
+            marker_array.markers.append(pending_label)
+
+            dot = Marker()
+            dot.header.frame_id = FRAME_MAP
+            dot.header.stamp = stamp
+            dot.ns = "inspection_region_pending"
+            dot.id = corner_id + 2
+            dot.type = Marker.SPHERE
+            dot.action = Marker.ADD
+            dot.pose.position.x = cx
+            dot.pose.position.y = cy
+            dot.pose.position.z = 0.02
+            dot.pose.orientation.w = 1.0
+            dot.scale.x = 0.06
+            dot.scale.y = 0.06
+            dot.scale.z = 0.01
+            dot.color.r = 0.80
+            dot.color.g = 0.70
+            dot.color.b = 0.95
+            dot.color.a = 0.90
+            marker_array.markers.append(dot)
+
+        region_base_id = next_marker_id + 100
         for index, region in enumerate(self.inspection_regions, start=1):
-            self._append_region_markers(marker_array, stamp, index, region)
-
-        if self.region_preview_points:
-            preview_marker = Marker()
-            preview_marker.header.frame_id = FRAME_MAP
-            preview_marker.header.stamp = stamp
-            preview_marker.ns = "inspection_region_preview"
-            preview_marker.id = 9500
-            preview_marker.type = Marker.LINE_STRIP
-            preview_marker.action = Marker.ADD
-            preview_marker.pose.orientation.w = 1.0
-            preview_marker.scale.x = 0.035
-            preview_marker.color.r = 0.05
-            preview_marker.color.g = 0.62
-            preview_marker.color.b = 0.38
-            preview_marker.color.a = 0.95
-            for path_point in self.region_preview_points:
-                preview_marker.points.append(self._marker_point(path_point.x, path_point.y, 0.07))
-            marker_array.markers.append(preview_marker)
+            self._append_region_markers(marker_array, stamp, index, region, region_base_id)
 
         self.marker_pub.publish(marker_array)
 
         path_msg = Path()
         path_msg.header.frame_id = FRAME_MAP
         path_msg.header.stamp = stamp
-        if self.inspection_regions:
-            preview_xy = [(point.x, point.y) for point in self.region_preview_points]
+        if self.inspection_regions and self.have_map_pose and self.have_map and self.map_msg is not None:
+            preview_xy = self._compute_inter_region_preview_path()
+        elif self.inspection_regions:
+            preview_xy = []
         else:
             preview_xy = self.rviz_preview_path
         for x, y in preview_xy:
@@ -570,21 +632,56 @@ class MissionManager(Node):
             path_msg.poses.append(pose)
         self.preview_pub.publish(path_msg)
 
-    def _append_region_markers(self, marker_array, stamp, index, region):
-        base_id = 10000 + index * 10
+    def _compute_inter_region_preview_path(self):
+        if not self.region_preview_points or not self.have_map or self.map_msg is None or not self.have_map_pose:
+            return []
+        start_xy = (self.current_map_pose["x"], self.current_map_pose["y"])
+        preview = preview_current_order(
+            self.map_msg,
+            start_xy,
+            self.region_preview_points,
+        )
+        if preview:
+            return preview.preview_path
+        return []
+
+    def _append_region_markers(self, marker_array, stamp, index, region, base_id):
+        width = region.max_x - region.min_x
+        height = region.max_y - region.min_y
+        region_marker_id = base_id + (index - 1) * 20
+
+        fill = Marker()
+        fill.header.frame_id = FRAME_MAP
+        fill.header.stamp = stamp
+        fill.ns = "inspection_region_fill"
+        fill.id = region_marker_id
+        fill.type = Marker.CUBE
+        fill.action = Marker.ADD
+        fill.pose.position.x = (region.min_x + region.max_x) / 2.0
+        fill.pose.position.y = (region.min_y + region.max_y) / 2.0
+        fill.pose.position.z = 0.01
+        fill.pose.orientation.w = 1.0
+        fill.scale.x = max(width, 0.01)
+        fill.scale.y = max(height, 0.01)
+        fill.scale.z = 0.005
+        fill.color.r = 0.47
+        fill.color.g = 0.24
+        fill.color.b = 0.72
+        fill.color.a = 0.18
+        marker_array.markers.append(fill)
 
         border = Marker()
         border.header.frame_id = FRAME_MAP
         border.header.stamp = stamp
-        border.ns = "inspection_regions"
-        border.id = base_id
+        border.ns = "inspection_region_border"
+        border.id = region_marker_id + 1
         border.type = Marker.LINE_STRIP
         border.action = Marker.ADD
         border.pose.orientation.w = 1.0
         border.scale.x = 0.045
-        border.color.r = 0.47
-        border.color.g = 0.24
-        border.color.b = 0.72
+        border.color.r = 0.65
+        border.color.g = 0.35
+        border.color.b = 0.85
         border.color.a = 0.95
         corners = [
             (region.min_x, region.min_y),
@@ -593,28 +690,68 @@ class MissionManager(Node):
             (region.min_x, region.max_y),
             (region.min_x, region.min_y),
         ]
-        for x, y in corners:
-            border.points.append(self._marker_point(x, y, 0.05))
+        for cx, cy in corners:
+            border.points.append(self._marker_point(cx, cy, 0.06))
         marker_array.markers.append(border)
+
+        for ci, (cx, cy) in enumerate(corners[:4]):
+            corner_dot = Marker()
+            corner_dot.header.frame_id = FRAME_MAP
+            corner_dot.header.stamp = stamp
+            corner_dot.ns = "inspection_region_corners"
+            corner_dot.id = region_marker_id + 2 + ci
+            corner_dot.type = Marker.SPHERE
+            corner_dot.action = Marker.ADD
+            corner_dot.pose.position.x = cx
+            corner_dot.pose.position.y = cy
+            corner_dot.pose.position.z = 0.07
+            corner_dot.pose.orientation.w = 1.0
+            corner_dot.scale.x = 0.10
+            corner_dot.scale.y = 0.10
+            corner_dot.scale.z = 0.10
+            corner_dot.color.r = 0.65
+            corner_dot.color.g = 0.35
+            corner_dot.color.b = 0.85
+            corner_dot.color.a = 0.95
+            marker_array.markers.append(corner_dot)
 
         label = Marker()
         label.header.frame_id = FRAME_MAP
         label.header.stamp = stamp
         label.ns = "inspection_region_labels"
-        label.id = base_id + 1
+        label.id = region_marker_id + 6
         label.type = Marker.TEXT_VIEW_FACING
         label.action = Marker.ADD
         label.pose.position.x = (region.min_x + region.max_x) / 2.0
         label.pose.position.y = (region.min_y + region.max_y) / 2.0
-        label.pose.position.z = 0.35
+        label.pose.position.z = 0.45
         label.pose.orientation.w = 1.0
-        label.scale.z = 0.18
-        label.color.r = 0.16
-        label.color.g = 0.21
-        label.color.b = 0.25
+        label.scale.z = 0.20
+        label.color.r = 0.85
+        label.color.g = 0.78
+        label.color.b = 0.95
         label.color.a = 1.0
-        label.text = f"{index}:{region.name}"
+        label.text = f"\u533a\u57df {index} ({width:.1f}\u00d7{height:.1f})"
         marker_array.markers.append(label)
+
+        region_points = self._generate_points_for_region(region)
+        if region_points:
+            region_scan = Marker()
+            region_scan.header.frame_id = FRAME_MAP
+            region_scan.header.stamp = stamp
+            region_scan.ns = "inspection_region_scan"
+            region_scan.id = region_marker_id + 7
+            region_scan.type = Marker.LINE_STRIP
+            region_scan.action = Marker.ADD
+            region_scan.pose.orientation.w = 1.0
+            region_scan.scale.x = 0.04
+            region_scan.color.r = 0.05
+            region_scan.color.g = 0.72
+            region_scan.color.b = 0.42
+            region_scan.color.a = 0.95
+            for rx, ry in region_points:
+                region_scan.points.append(self._marker_point(rx, ry, 0.08))
+            marker_array.markers.append(region_scan)
 
     @staticmethod
     def _marker_point(x, y, z):
@@ -795,15 +932,41 @@ class MissionManager(Node):
             response.success = True
             response.message = f"Abort requested for {', '.join(aborted)} and stop command sent"
             self.get_logger().warn(response.message)
-            self._publish_mission_status(response.message)
-            return response
-
-        self.mission_active = False
-        self.direct_nav_active = False
-        response.success = True
-        response.message = "No active mission. Stop command sent"
-        self.get_logger().warn(response.message)
         self._publish_mission_status(response.message)
+        return response
+
+    def _handle_undo_last_inspection_region(self, _request, response):
+        if self.pending_region_corner is not None:
+            cx, cy = self.pending_region_corner
+            self.pending_region_corner = None
+            self._publish_rviz_plan_visuals()
+            response.success = True
+            response.message = f"Undone pending region corner at ({cx:.2f}, {cy:.2f})"
+            self.get_logger().info(response.message)
+            return response
+        if not self.inspection_regions:
+            response.success = False
+            response.message = "No inspection regions to undo"
+            return response
+        removed = self.inspection_regions.pop()
+        self._recompute_region_preview()
+        self._publish_rviz_plan_visuals()
+        response.success = True
+        response.message = f"Undone region {removed.name}. {len(self.inspection_regions)} region(s) remaining"
+        self.get_logger().info(response.message)
+        return response
+
+    def _handle_undo_last_rviz_point(self, _request, response):
+        if not self.rviz_points:
+            response.success = False
+            response.message = "No RViz points to undo"
+            return response
+        removed = self.rviz_points.pop()
+        self._recompute_rviz_plan()
+        self._publish_rviz_plan_visuals()
+        response.success = True
+        response.message = f"Undone point {removed.point_name}. {len(self.rviz_points)} point(s) remaining"
+        self.get_logger().info(response.message)
         return response
 
     def _handle_start_navigation(self, request, response):

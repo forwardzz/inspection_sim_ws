@@ -36,6 +36,8 @@ SERVICE_CLEAR_INSPECTION_REGIONS = "/clear_inspection_regions"
 SERVICE_SAVE_INSPECTION_REGIONS = "/save_inspection_regions"
 SERVICE_LOAD_INSPECTION_REGIONS = "/load_inspection_regions"
 SERVICE_ABORT_MISSION = "/abort_mission"
+SERVICE_UNDO_LAST_INSPECTION_REGION = "/undo_last_inspection_region"
+SERVICE_UNDO_LAST_RVIZ_POINT = "/undo_last_rviz_point"
 
 INSPECTION_REGIONS_PATH = os.path.join(
     os.path.expanduser("~/inspection_sim_ws"),
