@@ -27,11 +27,27 @@ class LaunchManager(QObject):
         self,
         use_rviz=False,
         headless=False,
+        world=None,
+        world_name=None,
+        spawn_x=0.0,
+        spawn_y=0.0,
+        spawn_z=0.05,
+        spawn_yaw=0.0,
     ):
         command = (
             "ros2 launch inspection_sim_bringup sim.launch.py "
             f"use_rviz:={str(use_rviz).lower()} "
             f"headless:={str(headless).lower()}"
+        )
+        if world is not None:
+            command += f" world:={shlex.quote(world)}"
+        if world_name is not None:
+            command += f" world_name:={shlex.quote(world_name)}"
+        command += (
+            f" spawn_x:={spawn_x} "
+            f"spawn_y:={spawn_y} "
+            f"spawn_z:={spawn_z} "
+            f"spawn_yaw:={spawn_yaw}"
         )
         return self.start("sim", command)
 
@@ -39,11 +55,27 @@ class LaunchManager(QObject):
         self,
         use_rviz=True,
         headless=False,
+        world=None,
+        world_name=None,
+        spawn_x=0.0,
+        spawn_y=0.0,
+        spawn_z=0.05,
+        spawn_yaw=0.0,
     ):
         command = (
             "ros2 launch inspection_sim_bringup mapping.launch.py "
             f"use_rviz:={str(use_rviz).lower()} "
             f"headless:={str(headless).lower()}"
+        )
+        if world is not None:
+            command += f" world:={shlex.quote(world)}"
+        if world_name is not None:
+            command += f" world_name:={shlex.quote(world_name)}"
+        command += (
+            f" spawn_x:={spawn_x} "
+            f"spawn_y:={spawn_y} "
+            f"spawn_z:={spawn_z} "
+            f"spawn_yaw:={spawn_yaw}"
         )
         return self.start("mapping", command)
 
@@ -52,6 +84,16 @@ class LaunchManager(QObject):
         map_path,
         use_rviz=True,
         headless=False,
+        world=None,
+        world_name=None,
+        spawn_x=0.0,
+        spawn_y=0.0,
+        spawn_z=0.05,
+        spawn_yaw=0.0,
+        initial_pose_x=0.0,
+        initial_pose_y=0.0,
+        initial_pose_yaw=0.0,
+        regions=None,
     ):
         command = (
             "ros2 launch inspection_sim_bringup navigation.launch.py "
@@ -59,6 +101,23 @@ class LaunchManager(QObject):
             f"use_rviz:={str(use_rviz).lower()} "
             f"headless:={str(headless).lower()}"
         )
+        if world is not None:
+            command += f" world:={shlex.quote(world)}"
+        if world_name is not None:
+            command += f" world_name:={shlex.quote(world_name)}"
+        command += (
+            f" spawn_x:={spawn_x} "
+            f"spawn_y:={spawn_y} "
+            f"spawn_z:={spawn_z} "
+            f"spawn_yaw:={spawn_yaw}"
+        )
+        command += (
+            f" initial_pose_x:={initial_pose_x} "
+            f"initial_pose_y:={initial_pose_y} "
+            f"initial_pose_yaw:={initial_pose_yaw}"
+        )
+        if regions is not None:
+            command += f" regions:={shlex.quote(regions)}"
         return self.start("navigation", command)
 
     def save_map(self, map_path):

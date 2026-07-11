@@ -27,13 +27,13 @@ def _inflate(grid_map, radius_cells: int):
     return grid_map.clone_with_data(data), inflated
 
 
-def inflate_map(base_map, radius_m: float = 0.08):
+def inflate_map(base_map, radius_m: float = 0.10):
     radius_cells = max(1, int(round(radius_m / max(base_map.resolution, 1e-6))))
     return _inflate(base_map, radius_cells)
 
 
 def resolve_planning_map(base_map, critical_points):
-    planning_map, inflated = inflate_map(base_map, radius_m=0.08)
+    planning_map, inflated = inflate_map(base_map, radius_m=0.10)
     if inflated == 0:
         return base_map, 0
     if all(planning_map.is_valid(point[0], point[1]) for point in critical_points):

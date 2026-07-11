@@ -62,7 +62,7 @@ Visualization Manager:
       Topic:
         Value: /amcl_pose
     - Alpha: 1
-      Class: rviz_default_plugins/Marker
+      Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: MissionPoints
       Topic:

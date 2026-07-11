@@ -32,6 +32,8 @@ from .config import (
     SERVICE_SAVE_INSPECTION_REGIONS,
     SERVICE_SET_REGION_MODE,
     SERVICE_START_NAVIGATION,
+    SERVICE_UNDO_LAST_INSPECTION_REGION,
+    SERVICE_UNDO_LAST_RVIZ_POINT,
     TOPIC_AMCL_POSE,
     TOPIC_CMD_VEL,
     TOPIC_GOAL_POSE,
@@ -112,6 +114,12 @@ class RosAdapter:
         )
         self.abort_mission_client = self.node.create_client(
             Trigger, SERVICE_ABORT_MISSION
+        )
+        self.undo_last_region_client = self.node.create_client(
+            Trigger, SERVICE_UNDO_LAST_INSPECTION_REGION
+        )
+        self.undo_last_point_client = self.node.create_client(
+            Trigger, SERVICE_UNDO_LAST_RVIZ_POINT
         )
 
         self.node.create_subscription(Odometry, TOPIC_ODOM, self._odom_cb, 10)

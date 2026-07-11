@@ -1,0 +1,32 @@
+{
+  "scenes": [
+    {
+      "name": "默认巡检场景",
+      "world": "inspection_world.sdf",
+      "world_name": "inspection_world",
+      "spawn_x": 0.0,
+      "spawn_y": 0.0,
+      "spawn_z": 0.05,
+      "spawn_yaw": 0.0,
+      "initial_pose_x": 0.0,
+      "initial_pose_y": 0.0,
+      "initial_pose_yaw": 0.0,
+      "map": "inspection_map.yaml",
+      "regions": "inspection_regions.yaml"
+    },
+    {
+      "name": "新能源车辆运输船甲板",
+      "world": "ev_car_carrier_deck.sdf",
+      "world_name": "ev_car_carrier_deck_world",
+      "spawn_x": -13.2,
+      "spawn_y": 0.0,
+      "spawn_z": 0.25,
+      "spawn_yaw": 0.0,
+      "initial_pose_x": 0.0,
+      "initial_pose_y": 0.0,
+      "initial_pose_yaw": 0.0,
+      "map": "ev_car_carrier_deck_map.yaml",
+      "regions": "ev_car_carrier_deck_regions.yaml"
+    }
+  ]
+}

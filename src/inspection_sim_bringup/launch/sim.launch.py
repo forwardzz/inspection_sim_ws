@@ -15,6 +15,10 @@ def generate_launch_description():
     headless = LaunchConfiguration("headless")
     world_name = LaunchConfiguration("world_name")
     rviz_config = LaunchConfiguration("rviz_config")
+    spawn_x = LaunchConfiguration("spawn_x")
+    spawn_y = LaunchConfiguration("spawn_y")
+    spawn_z = LaunchConfiguration("spawn_z")
+    spawn_yaw = LaunchConfiguration("spawn_yaw")
 
     default_world = PathJoinSubstitution(
         [pkg_share, "worlds", "inspection_world.sdf"]
@@ -65,6 +69,26 @@ def generate_launch_description():
             default_value=default_rviz_config,
             description="RViz config file",
         ),
+        DeclareLaunchArgument(
+            "spawn_x",
+            default_value="0.0",
+            description="Robot spawn X position in Gazebo world coordinates",
+        ),
+        DeclareLaunchArgument(
+            "spawn_y",
+            default_value="0.0",
+            description="Robot spawn Y position in Gazebo world coordinates",
+        ),
+        DeclareLaunchArgument(
+            "spawn_z",
+            default_value="0.05",
+            description="Robot spawn Z position in Gazebo world coordinates",
+        ),
+        DeclareLaunchArgument(
+            "spawn_yaw",
+            default_value="0.0",
+            description="Robot spawn yaw in Gazebo world coordinates (radians)",
+        ),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(gz_sim_launch),
@@ -103,9 +127,10 @@ def generate_launch_description():
                         "-file", robot_sdf,
                         "-name", "inspection_tracked_robot",
                         "-allow_renaming", "false",
-                        "-x", "0.0",
-                        "-y", "0.0",
-                        "-z", "0.05",
+                        "-x", spawn_x,
+                        "-y", spawn_y,
+                        "-z", spawn_z,
+                        "-Y", spawn_yaw,
                     ],
                 ),
             ],

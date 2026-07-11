@@ -14,6 +14,14 @@ def generate_launch_description():
     world_name = LaunchConfiguration("world_name")
     world = LaunchConfiguration("world")
     map_file = LaunchConfiguration("map")
+    spawn_x = LaunchConfiguration("spawn_x")
+    spawn_y = LaunchConfiguration("spawn_y")
+    spawn_z = LaunchConfiguration("spawn_z")
+    spawn_yaw = LaunchConfiguration("spawn_yaw")
+    initial_pose_x = LaunchConfiguration("initial_pose_x")
+    initial_pose_y = LaunchConfiguration("initial_pose_y")
+    initial_pose_yaw = LaunchConfiguration("initial_pose_yaw")
+    regions = LaunchConfiguration("regions")
 
     sim_launch = PathJoinSubstitution(
         [pkg_share, "launch", "sim.launch.py"]
@@ -85,6 +93,46 @@ def generate_launch_description():
             default_value="inspection_world",
             description="Gazebo world name used for model spawning",
         ),
+        DeclareLaunchArgument(
+            "spawn_x",
+            default_value="0.0",
+            description="Robot spawn X position in Gazebo world coordinates",
+        ),
+        DeclareLaunchArgument(
+            "spawn_y",
+            default_value="0.0",
+            description="Robot spawn Y position in Gazebo world coordinates",
+        ),
+        DeclareLaunchArgument(
+            "spawn_z",
+            default_value="0.05",
+            description="Robot spawn Z position in Gazebo world coordinates",
+        ),
+        DeclareLaunchArgument(
+            "spawn_yaw",
+            default_value="0.0",
+            description="Robot spawn yaw in Gazebo world coordinates (radians)",
+        ),
+        DeclareLaunchArgument(
+            "initial_pose_x",
+            default_value="0.0",
+            description="AMCL initial pose X in map frame",
+        ),
+        DeclareLaunchArgument(
+            "initial_pose_y",
+            default_value="0.0",
+            description="AMCL initial pose Y in map frame",
+        ),
+        DeclareLaunchArgument(
+            "initial_pose_yaw",
+            default_value="0.0",
+            description="AMCL initial pose yaw in radians",
+        ),
+        DeclareLaunchArgument(
+            "regions",
+            default_value=default_regions,
+            description="Inspection regions YAML file path",
+        ),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(sim_launch),
@@ -95,6 +143,10 @@ def generate_launch_description():
                 "headless": headless,
                 "world_name": world_name,
                 "rviz_config": rviz_config,
+                "spawn_x": spawn_x,
+                "spawn_y": spawn_y,
+                "spawn_z": spawn_z,
+                "spawn_yaw": spawn_yaw,
             }.items(),
         ),
 
@@ -132,7 +184,7 @@ def generate_launch_description():
             output="screen",
             parameters=[{
                 "use_sim_time": use_sim_time,
-                "inspection_regions_path": default_regions,
+                "inspection_regions_path": regions,
             }],
         ),
 
@@ -149,7 +201,12 @@ def generate_launch_description():
             executable="amcl",
             name="amcl",
             output="screen",
-            parameters=[nav2_params, {"use_sim_time": use_sim_time}],
+            parameters=[nav2_params, {
+                "use_sim_time": use_sim_time,
+                "initial_pose.x": initial_pose_x,
+                "initial_pose.y": initial_pose_y,
+                "initial_pose.yaw": initial_pose_yaw,
+            }],
         ),
 
         Node(
