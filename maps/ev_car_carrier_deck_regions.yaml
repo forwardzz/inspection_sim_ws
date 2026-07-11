@@ -1,20 +1,32 @@
-version: 1
+version: 2
 map_frame: map
-sweep_spacing: 0.5
-region_margin: 0.15
+sweep_spacing: 0.1
+region_margin: 0.23
 regions:
 - name: REGION_1
-  min_x: 7.224686622619629
-  min_y: -2.923530340194702
-  max_x: 9.205791473388672
-  max_y: -1.3488965034484863
+  min_x: 2.173784017562866
+  min_y: 1.4146924018859863
+  max_x: 4.2274885177612305
+  max_y: 2.932401657104492
 - name: REGION_2
-  min_x: 7.17245626449585
-  min_y: 1.540993571281433
-  max_x: 9.176548957824707
-  max_y: 3.0862503051757812
+  min_x: 2.1901278495788574
+  min_y: -2.7643024921417236
+  max_x: 4.280172824859619
+  max_y: -1.5075998306274414
 - name: REGION_3
-  min_x: 12.468672752380371
-  min_y: -6.389890193939209
-  max_x: 14.420209884643555
-  max_y: -2.3015708923339844
+  min_x: 7.2117791175842285
+  min_y: -6.527985572814941
+  max_x: 9.22006893157959
+  max_y: -1.4714438915252686
+thermal_observation_distance: 0.05
+thermal_horizontal_fov_deg: 110.0
+thermal_overlap_ratio: 0.3
+straight_resolution: 0.05
+arc_resolution: 0.02
+execution_mode: chassis_primitives
+turn_pattern: rotate_drive_rotate
+chassis_linear_speed: 0.06
+chassis_angular_speed: 0.35
+chassis_position_tolerance: 0.03
+chassis_angle_tolerance: 0.05
+chassis_obstacle_distance: 0.28

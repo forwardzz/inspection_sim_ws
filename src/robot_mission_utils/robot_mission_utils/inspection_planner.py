@@ -389,7 +389,6 @@ def validate_mission_points(
         name = getattr(points[0], 'point_name', '') or 'Unnamed'
         return MissionValidation(False, f'Mission point {name} is too close to the robot start pose. Move it at least {min_start_distance_m:.2f} m away before starting navigation.')
 
-    inflated_map, _ = inflate_map(grid_map, radius_m=obstacle_margin_m)
     for point in points:
         gx, gy = grid_map.world_to_grid(*_extract_xy(point))
         name = getattr(point, 'point_name', '') or 'Unnamed'
@@ -397,8 +396,6 @@ def validate_mission_points(
             return MissionValidation(False, f'Mission point {name} is outside the current map bounds')
         if not grid_map.is_valid(gx, gy):
             return MissionValidation(False, f'Mission point {name} is in an obstacle or unknown area')
-        if not inflated_map.is_valid(gx, gy):
-            return MissionValidation(False, f'Mission point {name} is too close to an obstacle. Move it farther away before starting navigation.')
 
     preview = preview_current_order(map_msg, start_xy, points, smooth=False)
     if preview is None:

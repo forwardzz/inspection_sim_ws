@@ -92,7 +92,7 @@ controller_server:
       decel_lim_theta: -1.00
       vx_samples: 8
       vtheta_samples: 21
-      sim_time: 2.0
+      sim_time: 2.5
       sim_granularity: 0.05
       angular_sim_granularity: 0.05
       transform_tolerance: 0.5
@@ -106,7 +106,7 @@ controller_server:
       goal_distance_bias: 6.0
       goal_front_bias: 4.0
       alignment_bias: 12.0
-      occdist_scale: 0.6
+      occdist_scale: 2.5
       twirling_scale: 0.2
       oscillation_scale: 4.0
       prefer_forward_scale: 8.0

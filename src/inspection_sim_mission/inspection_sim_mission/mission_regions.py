@@ -20,25 +20,31 @@ class RegionGenerationResult:
     warnings: list
 
 
-def generate_region_points(regions, sweep_spacing, region_margin):
+DEFAULT_STRAIGHT_RESOLUTION = 0.05
+DEFAULT_ARC_RESOLUTION = 0.02
+
+
+def generate_region_points(
+    regions,
+    sweep_spacing,
+    region_margin,
+    straight_resolution=DEFAULT_STRAIGHT_RESOLUTION,
+    arc_resolution=DEFAULT_ARC_RESOLUTION,
+):
     generated = []
     warnings = []
     first_error = None
     for region in regions:
-        region_points = generate_points_for_region(region, sweep_spacing, region_margin)
-        region_generated = []
-        for point_index, (x, y) in enumerate(region_points, start=1):
-            region_generated.append(
-                make_inspection_point(
-                    f"{region.name}_P{point_index}",
-                    x,
-                    y,
-                    0.0,
-                )
-            )
+        region_generated = generate_coverage_path_for_region(
+            region,
+            sweep_spacing,
+            region_margin,
+            straight_resolution,
+            arc_resolution,
+        )
         if region_generated:
-            generated.extend(smooth_region_sweep(region_generated, region, region_margin))
-        if not region_points:
+            generated.extend(region_generated)
+        if not region_generated:
             message = (
                 f"{region.name} is too small for spacing={sweep_spacing:.2f}m "
                 f"and margin={region_margin:.2f}m"
@@ -48,6 +54,144 @@ def generate_region_points(regions, sweep_spacing, region_margin):
 
     assign_path_headings(generated)
     return RegionGenerationResult(generated, first_error, warnings)
+
+
+def generate_region_paths(
+    regions,
+    sweep_spacing,
+    region_margin,
+    straight_resolution=DEFAULT_STRAIGHT_RESOLUTION,
+    arc_resolution=DEFAULT_ARC_RESOLUTION,
+):
+    return [
+        generate_coverage_path_for_region(
+            region,
+            sweep_spacing,
+            region_margin,
+            straight_resolution,
+            arc_resolution,
+        )
+        for region in regions
+    ]
+
+
+def generate_chassis_path_for_region(region, sweep_spacing, region_margin):
+    points = [
+        make_inspection_point(f"{region.name}_P{index}", x, y, 0.0)
+        for index, (x, y) in enumerate(
+            generate_points_for_region(region, sweep_spacing, region_margin), start=1
+        )
+    ]
+    assign_path_headings(points)
+    return points
+
+
+def generate_chassis_region_paths(regions, sweep_spacing, region_margin):
+    return [
+        generate_chassis_path_for_region(region, sweep_spacing, region_margin)
+        for region in regions
+    ]
+
+
+def _append_line(samples, start, end, resolution, kind):
+    distance = math.hypot(end[0] - start[0], end[1] - start[1])
+    count = max(1, int(math.ceil(distance / max(resolution, 0.01))))
+    for index in range(count + 1):
+        if samples and index == 0:
+            continue
+        ratio = index / count
+        samples.append(
+            (
+                start[0] + (end[0] - start[0]) * ratio,
+                start[1] + (end[1] - start[1]) * ratio,
+                kind,
+            )
+        )
+
+
+def _append_arc(samples, center, radius, start_angle, end_angle, resolution):
+    arc_length = abs(end_angle - start_angle) * radius
+    count = max(3, int(math.ceil(arc_length / max(resolution, 0.005))))
+    for index in range(1, count + 1):
+        ratio = index / count
+        angle = start_angle + (end_angle - start_angle) * ratio
+        samples.append(
+            (
+                center[0] + radius * math.cos(angle),
+                center[1] + radius * math.sin(angle),
+                "turn",
+            )
+        )
+
+
+def generate_coverage_path_for_region(
+    region,
+    sweep_spacing,
+    region_margin,
+    straight_resolution=DEFAULT_STRAIGHT_RESOLUTION,
+    arc_resolution=DEFAULT_ARC_RESOLUTION,
+):
+    """Generate dense long-axis sweeps joined by tangent semicircular U-turns."""
+    min_x = region.min_x + region_margin
+    min_y = region.min_y + region_margin
+    max_x = region.max_x - region_margin
+    max_y = region.max_y - region_margin
+    if min_x >= max_x or min_y >= max_y:
+        return []
+
+    spacing = max(float(sweep_spacing), 0.05)
+    samples = []
+    if (max_x - min_x) >= (max_y - min_y):
+        lanes = sweep_positions(min_y, max_y, spacing)
+        if not lanes:
+            return []
+        max_radius = max((lanes[i + 1] - lanes[i]) * 0.5 for i in range(len(lanes) - 1)) if len(lanes) > 1 else 0.0
+        if max_x - min_x <= max_radius * 2.0 + 0.02:
+            return []
+        left = min_x + max_radius
+        right = max_x - max_radius
+        for lane_index, y in enumerate(lanes):
+            start, end = ((left, y), (right, y)) if lane_index % 2 == 0 else ((right, y), (left, y))
+            _append_line(samples, start, end, straight_resolution, "straight")
+            if lane_index + 1 >= len(lanes):
+                continue
+            next_y = lanes[lane_index + 1]
+            radius = (next_y - y) * 0.5
+            center_x = right if lane_index % 2 == 0 else left
+            center_y = y + radius
+            if lane_index % 2 == 0:
+                _append_arc(samples, (center_x, center_y), radius, -math.pi / 2.0, math.pi / 2.0, arc_resolution)
+            else:
+                _append_arc(samples, (center_x, center_y), radius, -math.pi / 2.0, -3.0 * math.pi / 2.0, arc_resolution)
+    else:
+        lanes = sweep_positions(min_x, max_x, spacing)
+        if not lanes:
+            return []
+        max_radius = max((lanes[i + 1] - lanes[i]) * 0.5 for i in range(len(lanes) - 1)) if len(lanes) > 1 else 0.0
+        if max_y - min_y <= max_radius * 2.0 + 0.02:
+            return []
+        bottom = min_y + max_radius
+        top = max_y - max_radius
+        for lane_index, x in enumerate(lanes):
+            start, end = ((x, bottom), (x, top)) if lane_index % 2 == 0 else ((x, top), (x, bottom))
+            _append_line(samples, start, end, straight_resolution, "straight")
+            if lane_index + 1 >= len(lanes):
+                continue
+            next_x = lanes[lane_index + 1]
+            radius = (next_x - x) * 0.5
+            center_x = x + radius
+            center_y = top if lane_index % 2 == 0 else bottom
+            if lane_index % 2 == 0:
+                _append_arc(samples, (center_x, center_y), radius, math.pi, 0.0, arc_resolution)
+            else:
+                _append_arc(samples, (center_x, center_y), radius, math.pi, 2.0 * math.pi, arc_resolution)
+
+    points = [
+        make_inspection_point(f"{region.name}_P{index}", x, y, 0.0)
+        for index, (x, y, _kind) in enumerate(samples, start=1)
+    ]
+    assign_path_headings(points)
+    return points
 
 
 def generate_points_for_region(region, sweep_spacing, region_margin):
@@ -200,7 +344,7 @@ def smooth_region_sweep(points, region, region_margin):
 
 def regions_to_yaml_data(regions, sweep_spacing, region_margin):
     return {
-        "version": 1,
+        "version": 2,
         "map_frame": "map",
         "sweep_spacing": sweep_spacing,
         "region_margin": region_margin,
@@ -218,7 +362,7 @@ def regions_to_yaml_data(regions, sweep_spacing, region_margin):
 
 
 def regions_from_yaml(data):
-    if int(data.get("version", 1)) != 1:
+    if int(data.get("version", 1)) not in (1, 2):
         raise ValueError("unsupported inspection region file version")
     if data.get("map_frame", "map") != "map":
         raise ValueError("inspection region file must use map_frame=map")

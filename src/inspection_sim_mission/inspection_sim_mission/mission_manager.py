@@ -8,25 +8,31 @@ from geometry_msgs.msg import Point, PointStamped, PoseStamped, PoseWithCovarian
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from rclpy.action import ActionClient
+from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.time import Time
 from std_msgs.msg import String
 from std_srvs.srv import SetBool, Trigger
+from sensor_msgs.msg import LaserScan
 from visualization_msgs.msg import Marker, MarkerArray
+from tf2_ros import Buffer, TransformException, TransformListener
 
 from robot_mission_utils.inspection_planner import (
     preview_current_order,
     validate_mission_points,
 )
 from robot_mission_utils.grid_map import GridMap
+from robot_mission_utils.map_inflation import inflate_map as inflate_grid_map
 from robot_monitor_interfaces.msg import InspectionPoint
 from robot_monitor_interfaces.srv import ConfirmInspectionPoints, Localize, StartNavigation
 
 from .mission_regions import (
     InspectionRegion,
     assign_path_headings,
+    generate_chassis_path_for_region,
+    generate_chassis_region_paths,
     generate_points_for_region,
-    generate_region_points,
     regions_from_yaml,
     regions_to_yaml_data,
     sweep_positions,
@@ -34,6 +40,7 @@ from .mission_regions import (
 from .qos import latched_qos
 from .robot_config import (
     ACTION_NAVIGATE_TO_POSE,
+    FRAME_BASE_LINK,
     FRAME_MAP,
     INSPECTION_REGIONS_PATH,
     SERVICE_ABORT_MISSION,
@@ -57,6 +64,7 @@ from .robot_config import (
     TOPIC_MISSION_PREVIEW_PATH,
     TOPIC_MISSION_STATUS,
     TOPIC_ODOM,
+    TOPIC_SCAN,
 )
 from .ros_utils import inspection_point_to_pose, make_inspection_point, quat_to_yaw
 
@@ -69,8 +77,62 @@ class MissionManager(Node):
     def __init__(self):
         super().__init__("mission_manager")
 
-        self.sweep_spacing = float(self.declare_parameter("sweep_spacing", 0.50).value)
-        self.region_margin = float(self.declare_parameter("region_margin", 0.15).value)
+        self.thermal_observation_distance = float(
+            self.declare_parameter("thermal_observation_distance", 0.05).value
+        )
+        self.thermal_horizontal_fov_deg = float(
+            self.declare_parameter("thermal_horizontal_fov_deg", 110.0).value
+        )
+        self.thermal_overlap_ratio = float(
+            self.declare_parameter("thermal_overlap_ratio", 0.30).value
+        )
+        theoretical_spacing = (
+            2.0
+            * self.thermal_observation_distance
+            * math.tan(math.radians(self.thermal_horizontal_fov_deg) * 0.5)
+            * (1.0 - self.thermal_overlap_ratio)
+        )
+        self.sweep_spacing = float(
+            self.declare_parameter("sweep_spacing", round(theoretical_spacing, 2)).value
+        )
+        self.region_margin = float(self.declare_parameter("region_margin", 0.23).value)
+        self.straight_resolution = float(
+            self.declare_parameter("straight_resolution", 0.05).value
+        )
+        self.arc_resolution = float(self.declare_parameter("arc_resolution", 0.02).value)
+        self.chassis_linear_speed = float(
+            self.declare_parameter("chassis_linear_speed", 0.06).value
+        )
+        self.chassis_angular_speed = float(
+            self.declare_parameter("chassis_angular_speed", 0.35).value
+        )
+        self.chassis_position_tolerance = float(
+            self.declare_parameter("chassis_position_tolerance", 0.03).value
+        )
+        self.chassis_angle_tolerance = float(
+            self.declare_parameter("chassis_angle_tolerance", 0.05).value
+        )
+        self.chassis_obstacle_distance = float(
+            self.declare_parameter("chassis_obstacle_distance", 0.28).value
+        )
+        self.region_obstacle_inset = float(
+            self.declare_parameter("region_obstacle_inset", 0.02).value
+        )
+        self.region_staging_distance = float(
+            self.declare_parameter("region_staging_distance", 0.20).value
+        )
+        self.clearance_cluster_distance = float(
+            self.declare_parameter("clearance_cluster_distance", 0.12).value
+        )
+        self.clearance_min_points = int(
+            self.declare_parameter("clearance_min_points", 4).value
+        )
+        self.clearance_required_frames = int(
+            self.declare_parameter("clearance_required_frames", 3).value
+        )
+        self.clearance_observation_sec = float(
+            self.declare_parameter("clearance_observation_sec", 1.0).value
+        )
         self.regions_path = str(
             self.declare_parameter(
                 "inspection_regions_path",
@@ -105,11 +167,29 @@ class MissionManager(Node):
         self.mission_waypoint_pause_sec = self.DEFAULT_WAYPOINT_PAUSE_SEC
         self.last_mission_feedback_log_time = 0.0
         self.mission_early_transition_goal = None
+        self.region_paths = []
+        self.region_path_index = 0
+        self.region_phase = ""
+        self.cached_region_plan = {}
+        self.region_approach_goal_handle = None
+        self.region_control_timer = None
+        self.region_target_index = 0
+        self.region_blocked_names = []
+        self.region_staging_points = []
+        self.clearance_started_time = None
+        self.clearance_obstacle_frames = 0
+        self.clearance_last_scan_stamp = None
+        self.latest_scan = None
+        self.last_scan_time = None
+        self.tf_consecutive_failures = 0
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
         self.direct_goal_handle = None
         self.direct_nav_active = False
         self.last_direct_feedback_log_time = 0.0
 
         self.create_subscription(Odometry, TOPIC_ODOM, self._odom_cb, 10)
+        self.create_subscription(LaserScan, TOPIC_SCAN, self._scan_cb, 10)
         self.create_subscription(
             PoseWithCovarianceStamped, TOPIC_AMCL_POSE, self._amcl_pose_cb, 10
         )
@@ -183,15 +263,19 @@ class MissionManager(Node):
             self.last_rviz_recompute_time = now_sec
             if self.rviz_points and not self.mission_active:
                 self._recompute_rviz_plan()
-            elif self.inspection_regions and self.have_map and self.map_msg is not None:
+            elif self.inspection_regions and self.have_map and self.map_msg is not None and not self.mission_active:
                 self._publish_rviz_plan_visuals()
+
+    def _scan_cb(self, msg):
+        self.latest_scan = msg
+        self.last_scan_time = self.get_clock().now()
 
     def _map_cb(self, msg):
         self.have_map = True
         self.map_msg = msg
         if self.rviz_points:
             self._recompute_rviz_plan()
-        elif self.inspection_regions:
+        elif self.inspection_regions and not self.mission_active:
             self._recompute_region_preview()
             self._publish_rviz_plan_visuals()
 
@@ -400,21 +484,20 @@ class MissionManager(Node):
         self.region_preview_points = self._generate_region_points()
 
     def _generate_region_points(self):
-        result = generate_region_points(
-            self.inspection_regions,
-            self.sweep_spacing,
-            self.region_margin,
+        paths = generate_chassis_region_paths(
+            self.inspection_regions, self.sweep_spacing, self.region_margin
         )
-        self.region_generation_error = result.first_error
-        for warning in result.warnings:
-            self.get_logger().warn(warning)
-        return result.points
+        self.region_generation_error = None
+        if any(not path for path in paths):
+            self.region_generation_error = (
+                f"One or more regions are too small for spacing={self.sweep_spacing:.2f}m "
+                f"and margin={self.region_margin:.2f}m"
+            )
+        return [point for path in paths for point in path]
 
     def _generate_points_for_region(self, region):
-        return generate_points_for_region(
-            region,
-            self.sweep_spacing,
-            self.region_margin,
+        return generate_chassis_path_for_region(
+            region, self.sweep_spacing, self.region_margin
         )
 
     def _validate_points_for_setting(self, points, context):
@@ -471,6 +554,31 @@ class MissionManager(Node):
                     f"Region {region.name} rejected: corner ({cx:.2f}, {cy:.2f}) "
                     f"is in an obstacle or unknown area.",
                 )
+
+        sweep_points = generate_points_for_region(
+            region, self.sweep_spacing, self.region_margin
+        )
+        inflated_grid, _ = inflate_grid_map(grid_map, radius_m=self.region_margin)
+        for sx, sy in sweep_points:
+            gx, gy = grid_map.world_to_grid(sx, sy)
+            if not grid_map.in_bounds(gx, gy):
+                return (
+                    False,
+                    f"Region {region.name} rejected: sweep point ({sx:.2f}, {sy:.2f}) "
+                    f"is outside map bounds.",
+                )
+            if not grid_map.is_valid(gx, gy):
+                return (
+                    False,
+                    f"Region {region.name} rejected: sweep point ({sx:.2f}, {sy:.2f}) "
+                    f"is in an obstacle or unknown area.",
+                )
+            if not inflated_grid.is_valid(gx, gy):
+                return (
+                    False,
+                    f"Region {region.name} rejected: sweep point ({sx:.2f}, {sy:.2f}) "
+                    f"is too close to an obstacle (clearance < {self.region_margin:.2f}m).",
+                )
         return True, f"Region {region.name} validated"
 
     def _publish_mission_status(self, message, safety=False):
@@ -498,6 +606,11 @@ class MissionManager(Node):
         marker_array.markers.append(delete_all)
 
         stamp = self.get_clock().now().to_msg()
+
+        if self.mission_active and self.mission_source == "region":
+            self._publish_mission_snapshot()
+            return
+
         next_marker_id = 1
 
         for index, point in enumerate(self.rviz_ordered_points, start=1):
@@ -623,12 +736,23 @@ class MissionManager(Node):
             preview_xy = []
         else:
             preview_xy = self.rviz_preview_path
-        for x, y in preview_xy:
+        for i, (x, y) in enumerate(preview_xy):
             pose = PoseStamped()
             pose.header = path_msg.header
             pose.pose.position.x = float(x)
             pose.pose.position.y = float(y)
-            pose.pose.orientation.w = 1.0
+            if i + 1 < len(preview_xy):
+                nx, ny = preview_xy[i + 1]
+                yaw = math.atan2(ny - y, nx - x)
+                pose.pose.orientation.z = math.sin(yaw * 0.5)
+                pose.pose.orientation.w = math.cos(yaw * 0.5)
+            elif i > 0:
+                px, py = preview_xy[i - 1]
+                yaw = math.atan2(y - py, x - px)
+                pose.pose.orientation.z = math.sin(yaw * 0.5)
+                pose.pose.orientation.w = math.cos(yaw * 0.5)
+            else:
+                pose.pose.orientation.w = 1.0
             path_msg.poses.append(pose)
         self.preview_pub.publish(path_msg)
 
@@ -649,6 +773,7 @@ class MissionManager(Node):
         width = region.max_x - region.min_x
         height = region.max_y - region.min_y
         region_marker_id = base_id + (index - 1) * 20
+        blocked = region.name in self.region_blocked_names
 
         fill = Marker()
         fill.header.frame_id = FRAME_MAP
@@ -664,9 +789,9 @@ class MissionManager(Node):
         fill.scale.x = max(width, 0.01)
         fill.scale.y = max(height, 0.01)
         fill.scale.z = 0.005
-        fill.color.r = 0.47
-        fill.color.g = 0.24
-        fill.color.b = 0.72
+        fill.color.r = 0.85 if blocked else 0.47
+        fill.color.g = 0.08 if blocked else 0.24
+        fill.color.b = 0.06 if blocked else 0.72
         fill.color.a = 0.18
         marker_array.markers.append(fill)
 
@@ -679,9 +804,9 @@ class MissionManager(Node):
         border.action = Marker.ADD
         border.pose.orientation.w = 1.0
         border.scale.x = 0.045
-        border.color.r = 0.65
-        border.color.g = 0.35
-        border.color.b = 0.85
+        border.color.r = 0.95 if blocked else 0.65
+        border.color.g = 0.12 if blocked else 0.35
+        border.color.b = 0.08 if blocked else 0.85
         border.color.a = 0.95
         corners = [
             (region.min_x, region.min_y),
@@ -731,16 +856,44 @@ class MissionManager(Node):
         label.color.g = 0.78
         label.color.b = 0.95
         label.color.a = 1.0
-        label.text = f"\u533a\u57df {index} ({width:.1f}\u00d7{height:.1f})"
+        label.text = (
+            f"\u533a\u57df {index} \u53d7\u963b"
+            if blocked
+            else f"\u533a\u57df {index} ({width:.1f}\u00d7{height:.1f})"
+        )
         marker_array.markers.append(label)
 
         region_points = self._generate_points_for_region(region)
         if region_points:
+            coverage = Marker()
+            coverage.header.frame_id = FRAME_MAP
+            coverage.header.stamp = stamp
+            coverage.ns = "inspection_thermal_coverage"
+            coverage.id = region_marker_id + 7
+            coverage.type = Marker.LINE_STRIP
+            coverage.action = Marker.ADD
+            coverage.pose.orientation.w = 1.0
+            coverage.scale.x = max(
+                0.02,
+                2.0
+                * self.thermal_observation_distance
+                * math.tan(math.radians(self.thermal_horizontal_fov_deg) * 0.5),
+            )
+            coverage.color.r = 0.10
+            coverage.color.g = 0.75
+            coverage.color.b = 0.95
+            coverage.color.a = 0.18
+            for route_point in region_points:
+                coverage.points.append(
+                    self._marker_point(route_point.x, route_point.y, 0.065)
+                )
+            marker_array.markers.append(coverage)
+
             region_scan = Marker()
             region_scan.header.frame_id = FRAME_MAP
             region_scan.header.stamp = stamp
             region_scan.ns = "inspection_region_scan"
-            region_scan.id = region_marker_id + 7
+            region_scan.id = region_marker_id + 8
             region_scan.type = Marker.LINE_STRIP
             region_scan.action = Marker.ADD
             region_scan.pose.orientation.w = 1.0
@@ -749,8 +902,10 @@ class MissionManager(Node):
             region_scan.color.g = 0.72
             region_scan.color.b = 0.42
             region_scan.color.a = 0.95
-            for rx, ry in region_points:
-                region_scan.points.append(self._marker_point(rx, ry, 0.08))
+            for route_point in region_points:
+                region_scan.points.append(
+                    self._marker_point(route_point.x, route_point.y, 0.08)
+                )
             marker_array.markers.append(region_scan)
 
     @staticmethod
@@ -827,6 +982,7 @@ class MissionManager(Node):
         self.region_preview_points = []
         self.region_generation_error = None
         self.pending_region_corner = None
+        self.region_blocked_names = []
         self._publish_rviz_plan_visuals()
         response.success = True
         response.message = f"Cleared {count} inspection region(s)"
@@ -838,6 +994,28 @@ class MissionManager(Node):
             self.inspection_regions,
             self.sweep_spacing,
             self.region_margin,
+        )
+        data.update(
+            {
+                "thermal_observation_distance": self.thermal_observation_distance,
+                "thermal_horizontal_fov_deg": self.thermal_horizontal_fov_deg,
+                "thermal_overlap_ratio": self.thermal_overlap_ratio,
+                "straight_resolution": self.straight_resolution,
+                "arc_resolution": self.arc_resolution,
+                "execution_mode": "chassis_primitives",
+                "turn_pattern": "rotate_drive_rotate",
+                "chassis_linear_speed": self.chassis_linear_speed,
+                "chassis_angular_speed": self.chassis_angular_speed,
+                "chassis_position_tolerance": self.chassis_position_tolerance,
+                "chassis_angle_tolerance": self.chassis_angle_tolerance,
+                "chassis_obstacle_distance": self.chassis_obstacle_distance,
+                "region_obstacle_inset": self.region_obstacle_inset,
+                "region_staging_distance": self.region_staging_distance,
+                "clearance_cluster_distance": self.clearance_cluster_distance,
+                "clearance_min_points": self.clearance_min_points,
+                "clearance_required_frames": self.clearance_required_frames,
+                "clearance_observation_sec": self.clearance_observation_sec,
+            }
         )
         try:
             directory = os.path.dirname(self.regions_path)
@@ -869,14 +1047,78 @@ class MissionManager(Node):
             self.get_logger().error(response.message)
             return response
 
+        file_version = int(data.get("version", 1))
         self.inspection_regions = regions
         self.pending_region_corner = None
-        self.sweep_spacing = float(data.get("sweep_spacing", self.sweep_spacing))
-        self.region_margin = float(data.get("region_margin", self.region_margin))
+        if file_version >= 2:
+            self.sweep_spacing = float(data.get("sweep_spacing", self.sweep_spacing))
+            self.region_margin = float(data.get("region_margin", self.region_margin))
+            self.thermal_observation_distance = float(
+                data.get("thermal_observation_distance", self.thermal_observation_distance)
+            )
+            self.thermal_horizontal_fov_deg = float(
+                data.get("thermal_horizontal_fov_deg", self.thermal_horizontal_fov_deg)
+            )
+            self.thermal_overlap_ratio = float(
+                data.get("thermal_overlap_ratio", self.thermal_overlap_ratio)
+            )
+            self.straight_resolution = float(
+                data.get("straight_resolution", self.straight_resolution)
+            )
+            self.arc_resolution = float(data.get("arc_resolution", self.arc_resolution))
+            self.chassis_linear_speed = float(
+                data.get("chassis_linear_speed", self.chassis_linear_speed)
+            )
+            self.chassis_angular_speed = float(
+                data.get("chassis_angular_speed", self.chassis_angular_speed)
+            )
+            self.chassis_position_tolerance = float(
+                data.get("chassis_position_tolerance", self.chassis_position_tolerance)
+            )
+            self.chassis_angle_tolerance = float(
+                data.get("chassis_angle_tolerance", self.chassis_angle_tolerance)
+            )
+            self.chassis_obstacle_distance = float(
+                data.get("chassis_obstacle_distance", self.chassis_obstacle_distance)
+            )
+            self.region_obstacle_inset = float(
+                data.get("region_obstacle_inset", self.region_obstacle_inset)
+            )
+            self.region_staging_distance = float(
+                data.get("region_staging_distance", self.region_staging_distance)
+            )
+            self.clearance_cluster_distance = float(
+                data.get("clearance_cluster_distance", self.clearance_cluster_distance)
+            )
+            self.clearance_min_points = int(
+                data.get("clearance_min_points", self.clearance_min_points)
+            )
+            self.clearance_required_frames = int(
+                data.get("clearance_required_frames", self.clearance_required_frames)
+            )
+            self.clearance_observation_sec = float(
+                data.get("clearance_observation_sec", self.clearance_observation_sec)
+            )
+        else:
+            self.sweep_spacing = 0.10
+            self.region_margin = 0.23
+            self.thermal_observation_distance = 0.05
+            self.thermal_horizontal_fov_deg = 110.0
+            self.thermal_overlap_ratio = 0.30
+            self.straight_resolution = 0.05
+            self.arc_resolution = 0.02
+            self.get_logger().warn(
+                "Loaded version 1 inspection regions: preserved region geometry and migrated "
+                "route settings to 50mm thermal defaults (spacing=0.10m, margin=0.23m). "
+                "Save regions to persist version 2."
+            )
         self._recompute_region_preview()
         self._publish_rviz_plan_visuals()
         response.success = True
-        response.message = f"Loaded {len(regions)} inspection region(s) from {self.regions_path}"
+        response.message = (
+            f"Loaded {len(regions)} inspection region(s) from {self.regions_path} "
+            f"with spacing={self.sweep_spacing:.2f}m"
+        )
         self.get_logger().info(response.message)
         return response
 
@@ -1043,7 +1285,19 @@ class MissionManager(Node):
             return response
 
         ordered_points = list(points)
-        if not self._start_sequential_mission(ordered_points, source, pause_sec):
+        if source == "region":
+            region_paths = generate_chassis_region_paths(
+                self.inspection_regions, self.sweep_spacing, self.region_margin
+            )
+            if not region_paths or any(not path for path in region_paths):
+                response.success = False
+                response.message = "Failed to generate one or more chassis inspection paths"
+                return response
+            if not self._start_region_path_mission(region_paths):
+                response.success = False
+                response.message = "Failed to start continuous region mission"
+                return response
+        elif not self._start_sequential_mission(ordered_points, source, pause_sec):
             response.success = False
             response.message = "Failed to start sequential mission"
             return response
@@ -1054,8 +1308,8 @@ class MissionManager(Node):
         response.success = True
         if source == "region":
             response.message = (
-                f"Sequential region inspection mission started with {len(ordered_points)} sweep waypoint(s) "
-                f"from {len(self.inspection_regions)} region(s), pause={pause_sec:.1f}s: {names}"
+                f"Chassis-program region mission started with {len(ordered_points)} waypoints "
+                f"from {len(self.inspection_regions)} region(s), spacing={self.sweep_spacing:.2f}m"
             )
         else:
             response.message = (
@@ -1081,6 +1335,476 @@ class MissionManager(Node):
         if not math.isfinite(pause_sec):
             pause_sec = self.DEFAULT_WAYPOINT_PAUSE_SEC
         return max(0.0, min(self.MAX_WAYPOINT_PAUSE_SEC, pause_sec))
+
+    def _start_region_path_mission(self, region_paths):
+        self._clear_mission_wait_timer()
+        # A new mission must not inherit blocked regions from an earlier run.
+        self.region_blocked_names = []
+        prepared_paths = []
+        staging_points = []
+        for region, route in zip(self.inspection_regions, region_paths):
+            prepared = self._select_region_staging(region, route)
+            if prepared is None:
+                self.get_logger().warn(f"No valid staging point found for {region.name}")
+                prepared_paths.append(list(route))
+                staging_points.append(None)
+            else:
+                selected_route, staging = prepared
+                prepared_paths.append(selected_route)
+                staging_points.append(staging)
+        self.mission_active = True
+        self.mission_source = "region"
+        self.mission_run_id += 1
+        self.region_paths = prepared_paths
+        self.region_staging_points = staging_points
+        self.region_path_index = 0
+        self.region_phase = "approach"
+
+        entries = []
+        for i, (region, route, staging) in enumerate(
+            zip(self.inspection_regions, prepared_paths, staging_points)
+        ):
+            entry = {
+                "region_name": region.name,
+                "staging_point": staging,
+                "chassis_route": route,
+                "nav2_approach_path": [],
+            }
+            if i == 0:
+                if staging is not None and self.have_map_pose:
+                    pose_x = self.current_map_pose["x"]
+                    pose_y = self.current_map_pose["y"]
+                    if self.have_map and self.map_msg is not None:
+                        preview = preview_current_order(
+                            self.map_msg,
+                            (pose_x, pose_y),
+                            [staging],
+                        )
+                        if preview:
+                            entry["nav2_approach_path"] = list(preview.preview_path)
+            else:
+                prev_route = prepared_paths[i - 1]
+                if prev_route and staging is not None:
+                    last_prev = prev_route[-1]
+                    if self.have_map and self.map_msg is not None:
+                        preview = preview_current_order(
+                            self.map_msg,
+                            (last_prev.x, last_prev.y),
+                            [staging],
+                        )
+                        if preview:
+                            entry["nav2_approach_path"] = list(preview.preview_path)
+            entries.append(entry)
+
+        self.cached_region_plan = {"entries": entries}
+        self._publish_mission_snapshot()
+        return self._send_region_approach_goal()
+
+    def _select_region_staging(self, region, route):
+        if len(route) < 2 or self.map_msg is None:
+            return None
+        candidates = []
+        for ordered in (list(route), list(reversed(route))):
+            if ordered is not route:
+                ordered = [
+                    make_inspection_point(p.point_name, p.x, p.y, p.theta) for p in ordered
+                ]
+                assign_path_headings(ordered)
+            first, second = ordered[0], ordered[1]
+            dx, dy = second.x - first.x, second.y - first.y
+            length = math.hypot(dx, dy)
+            if length < 1e-6:
+                continue
+            ux, uy = dx / length, dy / length
+            offset = self.region_margin + self.region_staging_distance
+            sx, sy = first.x - ux * offset, first.y - uy * offset
+            theta = math.atan2(first.y - sy, first.x - sx)
+            grid = GridMap.from_occupancy_grid(self.map_msg)
+            gx, gy = grid.world_to_grid(sx, sy)
+            if not grid.is_valid(gx, gy):
+                continue
+            distance = math.hypot(
+                sx - self.current_map_pose["x"], sy - self.current_map_pose["y"]
+            )
+            candidates.append(
+                (distance, ordered, make_inspection_point(f"{region.name}_STAGING", sx, sy, theta))
+            )
+        if not candidates:
+            return None
+        _, selected_route, staging = min(candidates, key=lambda item: item[0])
+        return selected_route, staging
+
+    def _send_region_approach_goal(self):
+        if not self.mission_active or self.region_path_index >= len(self.region_paths):
+            return False
+        point = self.region_staging_points[self.region_path_index]
+        if point is None:
+            self._skip_current_region("no reachable staging point outside region")
+            return True
+        goal = NavigateToPose.Goal()
+        goal.pose = self._inspection_point_to_pose(point)
+        run_id = self.mission_run_id
+        self.region_phase = "approach"
+        self.get_logger().info(
+            f"Navigating to region staging point {point.point_name} at ({point.x:.2f}, {point.y:.2f})"
+        )
+        future = self.nav_to_pose_client.send_goal_async(goal)
+        future.add_done_callback(
+            lambda done, rid=run_id: self._region_approach_response_cb(done, rid)
+        )
+        return True
+
+    def _region_approach_response_cb(self, future, run_id):
+        if not self.mission_active or run_id != self.mission_run_id:
+            return
+        try:
+            handle = future.result()
+        except Exception as exc:
+            self._finish_mission_failed(f"Region approach request failed: {exc}")
+            return
+        if not handle.accepted:
+            self._finish_mission_failed("Region approach goal was rejected by Nav2")
+            return
+        self.region_approach_goal_handle = handle
+        self.goal_handle = handle
+        result_future = handle.get_result_async()
+        result_future.add_done_callback(
+            lambda done, rid=run_id, expected=handle: (
+                self._region_approach_result_cb(done, rid, expected)
+            )
+        )
+
+    def _region_approach_result_cb(self, future, run_id, expected_handle):
+        if not self.mission_active or run_id != self.mission_run_id:
+            return
+        if expected_handle is not self.region_approach_goal_handle:
+            return
+        self.region_approach_goal_handle = None
+        self.goal_handle = None
+        try:
+            result = future.result().result
+        except Exception as exc:
+            self._finish_mission_failed(f"Region approach result failed: {exc}")
+            return
+        if result.error_code != NavigateToPose.Result.NONE:
+            self._finish_mission_failed(
+                f"Global approach to region {self.region_path_index + 1} failed: {result.error_msg}"
+            )
+            return
+        static_obstacle = self._region_static_obstacle()
+        if static_obstacle is not None:
+            self._skip_current_region(
+                f"static occupied cluster inside region near ({static_obstacle[0]:.2f}, {static_obstacle[1]:.2f})"
+            )
+            return
+        self.region_target_index = 0
+        self.region_phase = "clearance"
+        self.clearance_started_time = self.get_clock().now()
+        self.clearance_obstacle_frames = 0
+        self.clearance_last_scan_stamp = None
+        self.tf_consecutive_failures = 0
+        self._publish_mission_snapshot()
+        self._start_region_control_timer()
+        self.get_logger().info(
+            f"Region {self.region_path_index + 1}: Nav2 released at staging point; "
+            "collecting region clearance scans"
+        )
+
+    @staticmethod
+    def _normalize_angle(angle):
+        return math.atan2(math.sin(angle), math.cos(angle))
+
+    def _start_region_control_timer(self):
+        self._stop_region_control_timer()
+        self.region_control_timer = self.create_timer(0.05, self._region_control_tick)
+
+    def _stop_region_control_timer(self):
+        timer = self.region_control_timer
+        if timer is None:
+            return
+        self.region_control_timer = None
+        timer.cancel()
+        self.destroy_timer(timer)
+
+    def _laser_fresh(self):
+        if self.last_scan_time is None:
+            return False
+        return (self.get_clock().now() - self.last_scan_time).nanoseconds < 500_000_000
+
+    def _update_pose_from_tf(self):
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                FRAME_MAP,
+                FRAME_BASE_LINK,
+                Time(),
+                timeout=Duration(seconds=0.05),
+            )
+        except TransformException:
+            return False
+        t = transform.transform.translation
+        r = transform.transform.rotation
+        self.current_map_pose["x"] = t.x
+        self.current_map_pose["y"] = t.y
+        self.current_map_pose["theta"] = quat_to_yaw(r)
+        self.have_map_pose = True
+        return True
+
+    def _scan_points_in_map(self):
+        if self.latest_scan is None:
+            return None
+        source_frame = self.latest_scan.header.frame_id or "laser"
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                FRAME_MAP,
+                source_frame,
+                Time(),
+                timeout=Duration(seconds=0.10),
+            )
+        except TransformException as exc:
+            self.get_logger().warn(f"Cannot transform laser scan into map: {exc}")
+            return None
+        points = []
+        angle = self.latest_scan.angle_min
+        translation = transform.transform.translation
+        yaw = quat_to_yaw(transform.transform.rotation)
+        for distance in self.latest_scan.ranges:
+            if math.isfinite(distance) and self.latest_scan.range_min < distance < self.latest_scan.range_max:
+                points.append(
+                    (
+                        translation.x + distance * math.cos(yaw + angle),
+                        translation.y + distance * math.sin(yaw + angle),
+                    )
+                )
+            angle += self.latest_scan.angle_increment
+        return points
+
+    def _point_in_current_region(self, x, y):
+        region = self.inspection_regions[self.region_path_index]
+        inset = max(0.0, self.region_obstacle_inset)
+        return (
+            region.min_x + inset < x < region.max_x - inset
+            and region.min_y + inset < y < region.max_y - inset
+        )
+
+    def _scan_points_in_current_region(self):
+        points = self._scan_points_in_map()
+        if points is None:
+            return None
+        return [(x, y) for x, y in points if self._point_in_current_region(x, y)]
+
+    def _region_static_obstacle(self):
+        if self.map_msg is None:
+            return None
+        grid = GridMap.from_occupancy_grid(self.map_msg)
+        region = self.inspection_regions[self.region_path_index]
+        inset = max(0.0, self.region_obstacle_inset)
+        min_gx, min_gy = grid.world_to_grid(region.min_x + inset, region.min_y + inset)
+        max_gx, max_gy = grid.world_to_grid(region.max_x - inset, region.max_y - inset)
+        occupied = set()
+        for gy in range(min_gy, max_gy + 1):
+            for gx in range(min_gx, max_gx + 1):
+                if not grid.in_bounds(gx, gy):
+                    continue
+                value = grid.value(gx, gy)
+                if value >= grid.occupied_threshold:
+                    occupied.add((gx, gy))
+        while occupied:
+            seed = occupied.pop()
+            component = {seed}
+            pending = [seed]
+            while pending:
+                cx, cy = pending.pop()
+                for ox in (-1, 0, 1):
+                    for oy in (-1, 0, 1):
+                        neighbor = (cx + ox, cy + oy)
+                        if neighbor in occupied:
+                            occupied.remove(neighbor)
+                            component.add(neighbor)
+                            pending.append(neighbor)
+            if len(component) >= 3:
+                return grid.grid_to_world(*seed)
+        return None
+
+    def _largest_scan_cluster(self, points):
+        remaining = list(points)
+        largest = []
+        threshold = max(0.02, self.clearance_cluster_distance)
+        while remaining:
+            component = [remaining.pop()]
+            pending = list(component)
+            while pending:
+                px, py = pending.pop()
+                connected = [
+                    point
+                    for point in remaining
+                    if math.hypot(point[0] - px, point[1] - py) <= threshold
+                ]
+                for point in connected:
+                    remaining.remove(point)
+                    component.append(point)
+                    pending.append(point)
+            if len(component) > len(largest):
+                largest = component
+        return largest
+
+    def _clearance_tick(self):
+        if not self._laser_fresh():
+            self.tf_consecutive_failures += 1
+            if self.tf_consecutive_failures >= 5:
+                self._skip_current_region("laser timeout")
+            return
+        if not self._update_pose_from_tf():
+            self.tf_consecutive_failures += 1
+            if self.tf_consecutive_failures >= 5:
+                self._skip_current_region("map to base_link transform unavailable")
+            return
+        self.tf_consecutive_failures = 0
+        stamp = self.latest_scan.header.stamp
+        stamp_key = (stamp.sec, stamp.nanosec)
+        if stamp_key != self.clearance_last_scan_stamp:
+            self.clearance_last_scan_stamp = stamp_key
+            points = self._scan_points_in_current_region()
+            if points is None:
+                self.get_logger().warn("clearance scan transform unavailable")
+                return
+            cluster = self._largest_scan_cluster(points)
+            if len(cluster) >= self.clearance_min_points:
+                self.clearance_obstacle_frames += 1
+                if self.clearance_obstacle_frames >= self.clearance_required_frames:
+                    cx = sum(point[0] for point in cluster) / len(cluster)
+                    cy = sum(point[1] for point in cluster) / len(cluster)
+                    self._skip_current_region(
+                        f"laser obstacle cluster inside region: points={len(cluster)}, "
+                        f"frames={self.clearance_obstacle_frames}, center=({cx:.2f}, {cy:.2f})"
+                    )
+                    return
+            else:
+                self.clearance_obstacle_frames = 0
+        elapsed = (self.get_clock().now() - self.clearance_started_time).nanoseconds / 1e9
+        if elapsed >= self.clearance_observation_sec:
+            self.region_phase = "rotate"
+            self._publish_mission_snapshot()
+            self.get_logger().info(
+                f"Region {self.region_path_index + 1} clear; chassis inspection program started"
+            )
+
+    def _motion_corridor_blocked(self, target):
+        px = self.current_map_pose["x"]
+        py = self.current_map_pose["y"]
+        dx = target.x - px
+        dy = target.y - py
+        length = math.hypot(dx, dy)
+        if length < 1e-6:
+            return False
+        ux, uy = dx / length, dy / length
+        points = self._scan_points_in_current_region()
+        if points is None:
+            return True
+        candidates = []
+        for ox, oy in points:
+            rx, ry = ox - px, oy - py
+            forward = rx * ux + ry * uy
+            lateral = abs(rx * uy - ry * ux)
+            if 0.0 < forward < min(length + 0.10, self.chassis_obstacle_distance) and lateral < 0.14:
+                candidates.append((ox, oy))
+        return len(self._largest_scan_cluster(candidates)) >= 2
+
+    def _nearby_obstacle(self, radius=0.20):
+        px = self.current_map_pose["x"]
+        py = self.current_map_pose["y"]
+        points = self._scan_points_in_current_region()
+        if points is None:
+            return True
+        nearby = [(x, y) for x, y in points if math.hypot(x - px, y - py) < radius]
+        return len(self._largest_scan_cluster(nearby)) >= 2
+
+    def _region_control_tick(self):
+        if not self.mission_active or self.mission_source != "region":
+            self._stop_region_control_timer()
+            return
+        if not self._laser_fresh():
+            self.tf_consecutive_failures += 1
+            if self.tf_consecutive_failures >= 5:
+                self._skip_current_region("laser timeout")
+            return
+        if not self._update_pose_from_tf():
+            self._publish_zero_cmd()
+            self.tf_consecutive_failures += 1
+            if self.tf_consecutive_failures >= 5:
+                self._skip_current_region("map to base_link transform unavailable")
+            return
+        self.tf_consecutive_failures = 0
+        if self.region_phase == "clearance":
+            self._clearance_tick()
+            return
+        route = self.region_paths[self.region_path_index]
+        if self.region_target_index >= len(route):
+            self._complete_current_region()
+            return
+        target = route[self.region_target_index]
+        dx = target.x - self.current_map_pose["x"]
+        dy = target.y - self.current_map_pose["y"]
+        distance = math.hypot(dx, dy)
+        desired = math.atan2(dy, dx)
+        error = self._normalize_angle(desired - self.current_map_pose["theta"])
+        command = Twist()
+        if self.region_phase == "rotate":
+            if self._nearby_obstacle():
+                self._skip_current_region("obstacle detected while turning")
+                return
+            if abs(error) <= self.chassis_angle_tolerance:
+                self.region_phase = "drive"
+            else:
+                command.angular.z = max(
+                    -self.chassis_angular_speed,
+                    min(self.chassis_angular_speed, 1.2 * error),
+                )
+                self.cmd_vel_nav_pub.publish(command)
+                return
+        if distance <= self.chassis_position_tolerance:
+            self._publish_zero_cmd()
+            self.region_target_index += 1
+            self.region_phase = "rotate"
+            self._publish_mission_snapshot()
+            return
+        if self._motion_corridor_blocked(target):
+            self._skip_current_region("obstacle detected in chassis motion corridor")
+            return
+        command.linear.x = min(self.chassis_linear_speed, max(0.02, 0.8 * distance))
+        command.angular.z = max(-0.20, min(0.20, 1.5 * error))
+        self.cmd_vel_nav_pub.publish(command)
+
+    def _skip_current_region(self, reason):
+        self._stop_region_control_timer()
+        self._publish_zero_cmd()
+        region_name = self.inspection_regions[self.region_path_index].name
+        self.region_blocked_names.append(region_name)
+        self._publish_mission_snapshot()
+        self._warn_safety(f"Region {region_name} blocked: {reason}; navigating to next region")
+        self._publish_rviz_plan_visuals()
+        self._advance_region()
+
+    def _complete_current_region(self):
+        self._stop_region_control_timer()
+        self._publish_zero_cmd()
+        self.get_logger().info(
+            f"Region {self.region_path_index + 1}/{len(self.region_paths)} chassis inspection completed"
+        )
+        self._publish_mission_snapshot()
+        self._advance_region()
+
+    def _advance_region(self):
+        self.region_path_index += 1
+        if self.region_path_index >= len(self.region_paths):
+            if self.region_blocked_names:
+                self._finish_mission_failed(
+                    "Region inspection partially completed; blocked: "
+                    + ", ".join(self.region_blocked_names)
+                )
+            else:
+                self._finish_mission_success()
+            return
+        self._send_region_approach_goal()
 
     def _start_sequential_mission(self, ordered_points, source, pause_sec):
         self._clear_mission_wait_timer()
@@ -1308,12 +2032,298 @@ class MissionManager(Node):
         self.destroy_timer(timer)
 
     def _clear_mission_state(self):
+        self._stop_region_control_timer()
         self.mission_points = []
         self.mission_index = 0
         self.mission_source = ""
         self.mission_waypoint_pause_sec = self.DEFAULT_WAYPOINT_PAUSE_SEC
         self.last_mission_feedback_log_time = 0.0
         self.mission_early_transition_goal = None
+        self.region_paths = []
+        self.region_path_index = 0
+        self.region_phase = ""
+        self.region_approach_goal_handle = None
+        self.region_target_index = 0
+        self.region_staging_points = []
+        self.clearance_started_time = None
+        self.clearance_obstacle_frames = 0
+        self.clearance_last_scan_stamp = None
+        self.tf_consecutive_failures = 0
+        self.cached_region_plan = {}
+        self._last_mission_snapshot_time = None
+
+    def _publish_region_mission_markers(self, target_array=None):
+        if not self.mission_active or self.mission_source != "region":
+            return
+        if not self.cached_region_plan:
+            return
+        entries = self.cached_region_plan.get("entries", [])
+        if not entries:
+            return
+
+        if target_array is None:
+            target_array = MarkerArray()
+        stamp = self.get_clock().now().to_msg()
+
+        for i, entry in enumerate(entries):
+            chassis_route = entry["chassis_route"]
+            staging = entry["staging_point"]
+            nav2_path = entry["nav2_approach_path"]
+
+            blocked = entry["region_name"] in self.region_blocked_names
+            is_current = i == self.region_path_index
+            is_past = i < self.region_path_index
+            is_approaching = is_current and self.region_phase == "approach"
+
+            nav2_color_r = 0.1
+            nav2_color_g = 0.85
+            nav2_color_b = 0.85
+            chassis_color_r = 0.05
+            chassis_color_g = 0.72
+            chassis_color_b = 0.42
+            chassis_trim_start = 0
+
+            if blocked:
+                nav2_color_r = 0.95
+                nav2_color_g = 0.15
+                nav2_color_b = 0.15
+                chassis_color_r = 0.95
+                chassis_color_g = 0.15
+                chassis_color_b = 0.15
+            elif is_past:
+                nav2_color_r = 0.5
+                nav2_color_g = 0.5
+                nav2_color_b = 0.5
+                chassis_color_r = 0.5
+                chassis_color_g = 0.5
+                chassis_color_b = 0.5
+            elif is_current and not is_approaching:
+                chassis_color_r = 1.0
+                chassis_color_g = 0.75
+                chassis_color_b = 0.15
+                chassis_trim_start = self.region_target_index
+
+            if nav2_path:
+                nav2_line = Marker()
+                nav2_line.header.frame_id = FRAME_MAP
+                nav2_line.header.stamp = stamp
+                nav2_line.ns = "mission_nav2_segments"
+                nav2_line.id = 5000 + i
+                nav2_line.type = Marker.LINE_STRIP
+                nav2_line.action = Marker.ADD
+                nav2_line.pose.orientation.w = 1.0
+                nav2_line.scale.x = 0.04
+                nav2_line.color.r = nav2_color_r
+                nav2_line.color.g = nav2_color_g
+                nav2_line.color.b = nav2_color_b
+                nav2_line.color.a = 0.95
+                for x, y in nav2_path:
+                    nav2_line.points.append(self._marker_point(x, y, 0.06))
+                target_array.markers.append(nav2_line)
+
+            if chassis_route:
+                chassis_line = Marker()
+                chassis_line.header.frame_id = FRAME_MAP
+                chassis_line.header.stamp = stamp
+                chassis_line.ns = "mission_chassis_routes"
+                chassis_line.id = 6000 + i
+                chassis_line.type = Marker.LINE_STRIP
+                chassis_line.action = Marker.ADD
+                chassis_line.pose.orientation.w = 1.0
+                chassis_line.scale.x = 0.05
+                chassis_line.color.r = chassis_color_r
+                chassis_line.color.g = chassis_color_g
+                chassis_line.color.b = chassis_color_b
+                chassis_line.color.a = 0.95
+                for pi, pt in enumerate(chassis_route):
+                    if pi >= chassis_trim_start:
+                        chassis_line.points.append(
+                            self._marker_point(pt.x, pt.y, 0.08)
+                        )
+                target_array.markers.append(chassis_line)
+
+            if staging is not None:
+                staging_color_r = 0.05
+                staging_color_g = 0.72
+                staging_color_b = 0.42
+                if blocked:
+                    staging_color_r = 0.95
+                    staging_color_g = 0.15
+                    staging_color_b = 0.15
+                elif is_past:
+                    staging_color_r = 0.5
+                    staging_color_g = 0.5
+                    staging_color_b = 0.5
+                elif is_current:
+                    staging_color_r = 1.0
+                    staging_color_g = 0.75
+                    staging_color_b = 0.15
+
+                staging_sphere = Marker()
+                staging_sphere.header.frame_id = FRAME_MAP
+                staging_sphere.header.stamp = stamp
+                staging_sphere.ns = "mission_staging_points"
+                staging_sphere.id = 7000 + i
+                staging_sphere.type = Marker.SPHERE
+                staging_sphere.action = Marker.ADD
+                staging_sphere.pose.position.x = staging.x
+                staging_sphere.pose.position.y = staging.y
+                staging_sphere.pose.position.z = 0.10
+                staging_sphere.pose.orientation.w = 1.0
+                staging_sphere.scale.x = 0.12
+                staging_sphere.scale.y = 0.12
+                staging_sphere.scale.z = 0.12
+                staging_sphere.color.r = staging_color_r
+                staging_sphere.color.g = staging_color_g
+                staging_sphere.color.b = staging_color_b
+                staging_sphere.color.a = 0.95
+                target_array.markers.append(staging_sphere)
+
+                staging_text = Marker()
+                staging_text.header.frame_id = FRAME_MAP
+                staging_text.header.stamp = stamp
+                staging_text.ns = "mission_staging_points"
+                staging_text.id = 7000 + i + 1000
+                staging_text.type = Marker.TEXT_VIEW_FACING
+                staging_text.action = Marker.ADD
+                staging_text.pose.position.x = staging.x
+                staging_text.pose.position.y = staging.y + 0.15
+                staging_text.pose.position.z = 0.25
+                staging_text.pose.orientation.w = 1.0
+                staging_text.scale.z = 0.16
+                staging_text.color.r = staging_color_r
+                staging_text.color.g = staging_color_g
+                staging_text.color.b = staging_color_b
+                staging_text.color.a = 1.0
+                staging_text.text = str(i + 1)
+                target_array.markers.append(staging_text)
+
+        self.marker_pub.publish(target_array)
+
+    def _publish_mission_snapshot(self):
+        now = self.get_clock().now()
+        if hasattr(self, '_last_mission_snapshot_time') and self._last_mission_snapshot_time is not None:
+            if (now - self._last_mission_snapshot_time).nanoseconds < 50_000_000:
+                return
+        self._last_mission_snapshot_time = now
+        stamp = self.get_clock().now().to_msg()
+        marker_array = MarkerArray()
+        delete_all = Marker()
+        delete_all.header.frame_id = FRAME_MAP
+        delete_all.header.stamp = stamp
+        delete_all.action = Marker.DELETEALL
+        marker_array.markers.append(delete_all)
+
+        path_msg = Path()
+        path_msg.header.frame_id = FRAME_MAP
+        path_msg.header.stamp = stamp
+        self.preview_pub.publish(path_msg)
+
+        self._publish_region_mission_markers(target_array=marker_array)
+
+        for index, region in enumerate(self.inspection_regions, start=1):
+            width = region.max_x - region.min_x
+            height = region.max_y - region.min_y
+            blocked = region.name in self.region_blocked_names
+            is_current = (index - 1) == self.region_path_index
+            is_past = (index - 1) < self.region_path_index
+
+            fill_r, fill_g, fill_b = 0.47, 0.24, 0.72
+            border_r, border_g, border_b = 0.65, 0.35, 0.85
+            if blocked:
+                fill_r, fill_g, fill_b = 0.85, 0.08, 0.06
+                border_r, border_g, border_b = 0.95, 0.12, 0.08
+            elif is_current:
+                fill_r, fill_g, fill_b = 0.55, 0.55, 0.20
+                border_r, border_g, border_b = 1.0, 0.75, 0.15
+            elif is_past:
+                border_r, border_g, border_b = 0.5, 0.5, 0.5
+
+            fill = Marker()
+            fill.header.frame_id = FRAME_MAP
+            fill.header.stamp = stamp
+            fill.ns = "inspection_region_fill"
+            fill.id = 100 + (index - 1) * 20
+            fill.type = Marker.CUBE
+            fill.action = Marker.ADD
+            fill.pose.position.x = (region.min_x + region.max_x) / 2.0
+            fill.pose.position.y = (region.min_y + region.max_y) / 2.0
+            fill.pose.position.z = 0.01
+            fill.pose.orientation.w = 1.0
+            fill.scale.x = max(width, 0.01)
+            fill.scale.y = max(height, 0.01)
+            fill.scale.z = 0.005
+            fill.color.r = fill_r
+            fill.color.g = fill_g
+            fill.color.b = fill_b
+            fill.color.a = 0.18
+            marker_array.markers.append(fill)
+
+            border = Marker()
+            border.header.frame_id = FRAME_MAP
+            border.header.stamp = stamp
+            border.ns = "inspection_region_border"
+            border.id = 100 + (index - 1) * 20 + 1
+            border.type = Marker.LINE_STRIP
+            border.action = Marker.ADD
+            border.pose.orientation.w = 1.0
+            border.scale.x = 0.045
+            border.color.r = border_r
+            border.color.g = border_g
+            border.color.b = border_b
+            border.color.a = 0.95
+            corners = [
+                (region.min_x, region.min_y),
+                (region.max_x, region.min_y),
+                (region.max_x, region.max_y),
+                (region.min_x, region.max_y),
+                (region.min_x, region.min_y),
+            ]
+            for cx, cy in corners:
+                border.points.append(self._marker_point(cx, cy, 0.06))
+            marker_array.markers.append(border)
+
+            for ci, (cx, cy) in enumerate(corners[:4]):
+                corner_dot = Marker()
+                corner_dot.header.frame_id = FRAME_MAP
+                corner_dot.header.stamp = stamp
+                corner_dot.ns = "inspection_region_corners"
+                corner_dot.id = 100 + (index - 1) * 20 + 2 + ci
+                corner_dot.type = Marker.SPHERE
+                corner_dot.action = Marker.ADD
+                corner_dot.pose.position.x = cx
+                corner_dot.pose.position.y = cy
+                corner_dot.pose.position.z = 0.07
+                corner_dot.pose.orientation.w = 1.0
+                corner_dot.scale.x = 0.10
+                corner_dot.scale.y = 0.10
+                corner_dot.scale.z = 0.10
+                corner_dot.color.r = border_r
+                corner_dot.color.g = border_g
+                corner_dot.color.b = border_b
+                corner_dot.color.a = 0.95
+                marker_array.markers.append(corner_dot)
+
+            label = Marker()
+            label.header.frame_id = FRAME_MAP
+            label.header.stamp = stamp
+            label.ns = "inspection_region_labels"
+            label.id = 100 + (index - 1) * 20 + 6
+            label.type = Marker.TEXT_VIEW_FACING
+            label.action = Marker.ADD
+            label.pose.position.x = (region.min_x + region.max_x) / 2.0
+            label.pose.position.y = (region.min_y + region.max_y) / 2.0
+            label.pose.position.z = 0.45
+            label.pose.orientation.w = 1.0
+            label.scale.z = 0.20
+            label.color.r = 0.85
+            label.color.g = 0.78
+            label.color.b = 0.95
+            label.color.a = 1.0
+            label.text = f"\u533a\u57df {index} ({width:.1f}\u00d7{height:.1f})"
+            marker_array.markers.append(label)
+
+        self.marker_pub.publish(marker_array)
 
     def _finish_mission_success(self):
         self.goal_handle = None
