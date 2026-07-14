@@ -14,10 +14,10 @@ regions:
   max_x: 4.280172824859619
   max_y: -1.5075998306274414
 - name: REGION_3
-  min_x: 7.2117791175842285
-  min_y: -6.527985572814941
-  max_x: 9.22006893157959
-  max_y: -1.4714438915252686
+  min_x: 7.344547271728516
+  min_y: 1.5765321254730225
+  max_x: 8.866389274597168
+  max_y: 2.8644089698791504
 thermal_observation_distance: 0.05
 thermal_horizontal_fov_deg: 110.0
 thermal_overlap_ratio: 0.3
@@ -30,3 +30,12 @@ chassis_angular_speed: 0.35
 chassis_position_tolerance: 0.03
 chassis_angle_tolerance: 0.05
 chassis_obstacle_distance: 0.28
+region_obstacle_wait_sec: 3.0
+region_obstacle_clear_frames: 10
+region_obstacle_max_retries: 2
+region_obstacle_inset: 0.02
+region_staging_distance: 0.2
+clearance_cluster_distance: 0.12
+clearance_min_points: 4
+clearance_required_frames: 3
+clearance_observation_sec: 1.0

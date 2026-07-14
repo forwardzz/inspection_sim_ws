@@ -185,6 +185,9 @@ def generate_launch_description():
             parameters=[{
                 "use_sim_time": use_sim_time,
                 "inspection_regions_path": regions,
+                "mission_home_x": initial_pose_x,
+                "mission_home_y": initial_pose_y,
+                "mission_home_yaw": initial_pose_yaw,
             }],
         ),
 

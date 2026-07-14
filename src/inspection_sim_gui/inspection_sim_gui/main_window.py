@@ -53,6 +53,15 @@ except ImportError:
     psutil = None
 
 
+def load_scene_catalog(path):
+    with open(path, "r", encoding="utf-8") as catalog_file:
+        data = json.load(catalog_file)
+    scenes = data.get("scenes", [])
+    if not isinstance(scenes, list):
+        raise ValueError("scene catalog 'scenes' must be a list")
+    return scenes
+
+
 class GuiSignals(QObject):
     log = pyqtSignal(str)
     nav_feedback = pyqtSignal(str)
@@ -162,6 +171,8 @@ class MainWindow(QMainWindow):
         self.ros = ros_adapter
         self.signals = signals
         self.settings = QSettings("inspection_sim", "inspection_sim_gui")
+        self._startup_log_messages = []
+        self._shutdown_complete = False
 
         node = self.ros.node
         workspace_default = node.declare_parameter("workspace_path", DEFAULT_WORKSPACE_PATH).value
@@ -177,8 +188,6 @@ class MainWindow(QMainWindow):
             catalog_default = os.path.join(self.bringup_share, "scenes", "scene_catalog.json")
             if os.path.isfile(catalog_default):
                 self.scenes = self._load_scene_catalog(catalog_default)
-        saved_scene = self.settings.value("current_scene", "")
-
         self.launch_manager = LaunchManager(workspace_default, ros_setup_default)
         self.launch_manager.log_line.connect(self.append_log)
         self.launch_manager.state_changed.connect(self._launch_state_changed)
@@ -228,6 +237,13 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             pause_default = 2.0
         self.waypoint_pause_spin = self._double_spin(0.0, 60.0, pause_default, 0.5)
+        self.return_to_start_check = QCheckBox("任务完成后返回起点")
+        self.return_to_start_check.setChecked(
+            self.settings.value("return_to_start", "false") == "true"
+        )
+        self.return_to_start_check.setToolTip(
+            "仅在任务正常完成后返回当前场景的固定初始位姿"
+        )
 
         self.pose_label = QLabel("里程计: 等待数据")
         self.velocity_label = QLabel("速度: 等待数据")
@@ -261,6 +277,9 @@ class MainWindow(QMainWindow):
         self._connect()
 
         self._populate_scene_combo()
+        for message in self._startup_log_messages:
+            self.append_log(message)
+        self._startup_log_messages.clear()
 
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._refresh_status)
@@ -402,6 +421,7 @@ class MainWindow(QMainWindow):
 
         params = QFormLayout()
         params.addRow("点位停留时间 s", self.waypoint_pause_spin)
+        params.addRow("", self.return_to_start_check)
         layout.addLayout(params)
 
         region = QHBoxLayout()
@@ -512,6 +532,7 @@ class MainWindow(QMainWindow):
         return group
 
     def _connect(self):
+        self.scene_combo.currentIndexChanged.connect(self._on_scene_changed)
         self.linear_spin.valueChanged.connect(
             lambda value: self.linear_slider.setValue(int(value / MAX_LINEAR_SPEED_MPS * 100))
         )
@@ -730,8 +751,15 @@ class MainWindow(QMainWindow):
     def start_mission(self):
         request = StartNavigation.Request()
         request.waypoint_pause_sec = float(self.waypoint_pause_spin.value())
+        request.return_to_start = self.return_to_start_check.isChecked()
         self.settings.setValue("waypoint_pause_sec", request.waypoint_pause_sec)
-        self.append_log(f"[MISSION] start mission pause={request.waypoint_pause_sec:.1f}s")
+        self.settings.setValue(
+            "return_to_start", "true" if request.return_to_start else "false"
+        )
+        return_mode = "return home" if request.return_to_start else "stop at final point"
+        self.append_log(
+            f"[MISSION] start mission pause={request.waypoint_pause_sec:.1f}s, {return_mode}"
+        )
         self.ros.call_service_async(
             self.ros.start_navigation_client,
             request,
@@ -1143,11 +1171,13 @@ class MainWindow(QMainWindow):
 
     def _load_scene_catalog(self, path):
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data.get("scenes", [])
+            return load_scene_catalog(path)
         except Exception as e:
-            self.append_log(f"[SCENE] Failed to load catalog {path}: {e}")
+            message = f"[SCENE] Failed to load catalog {path}: {e}"
+            if hasattr(self, "log_view"):
+                self.append_log(message)
+            else:
+                self._startup_log_messages.append(message)
             return []
 
     def refresh_scenes(self):
@@ -1174,7 +1204,6 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.scene_combo.setCurrentIndex(idx)
         if self.scene_combo.count() > 0:
-            self.scene_combo.currentIndexChanged.connect(self._on_scene_changed)
             self._on_scene_changed(self.scene_combo.currentIndex())
         self.scene_combo.blockSignals(False)
 
@@ -1228,9 +1257,19 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.Yes:
                 event.ignore()
                 return
+        self.shutdown()
+        event.accept()
+
+    def shutdown(self):
+        if self._shutdown_complete:
+            return
+        self._shutdown_complete = True
+        if hasattr(self, "status_timer"):
+            self.status_timer.stop()
+        if hasattr(self, "initial_pose_retry_timer"):
+            self.initial_pose_retry_timer.stop()
         self.launch_manager.stop()
         self.ros.shutdown()
-        event.accept()
 
 
 def run_app(ros_adapter, signals):

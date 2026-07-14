@@ -1,3 +1,4 @@
+import signal
 import sys
 
 from PyQt5.QtWidgets import QApplication
@@ -16,8 +17,17 @@ def main():
         mission_status_callback=signals.mission_status,
     )
     window = MainWindow(ros, signals)
+    app.aboutToQuit.connect(window.shutdown)
+    signal.signal(signal.SIGINT, lambda *_args: app.quit())
+    signal.signal(signal.SIGTERM, lambda *_args: app.quit())
     window.show()
-    sys.exit(app.exec_())
+    try:
+        exit_code = app.exec_()
+    except KeyboardInterrupt:
+        exit_code = 0
+    finally:
+        window.shutdown()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

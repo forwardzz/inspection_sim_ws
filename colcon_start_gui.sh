@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
+set -e
+
 cd "$(dirname "$0")"
 
-killros
-
-colcon build
-
+source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install
 source install/setup.bash
 
-ros2 launch inspection_sim_gui gui.launch.py
+exec ros2 launch inspection_sim_gui gui.launch.py
+/

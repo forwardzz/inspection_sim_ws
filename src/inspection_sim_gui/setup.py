@@ -22,6 +22,7 @@ setup(
     maintainer_email="zjy@example.com",
     description="PyQt5 control panel for inspection robot simulation",
     license="Apache-2.0",
+    tests_require=["pytest"],
     entry_points={
         "console_scripts": [
             "inspection_sim_gui = inspection_sim_gui.main:main",

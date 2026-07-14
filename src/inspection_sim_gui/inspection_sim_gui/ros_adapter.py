@@ -79,6 +79,8 @@ class RosAdapter:
         self.mission_status_callback = mission_status_callback
         self._lock = threading.Lock()
         self._goal_handle = None
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_complete = False
 
         map_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -248,11 +250,16 @@ class RosAdapter:
             return dict(self.data)
 
     def shutdown(self):
+        with self._shutdown_lock:
+            if self._shutdown_complete:
+                return
+            self._shutdown_complete = True
         try:
             self.publish_cmd_vel(0.0, 0.0)
         except Exception:
             pass
         self.executor.shutdown()
+        self.spin_thread.join(timeout=1.0)
         self.node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
