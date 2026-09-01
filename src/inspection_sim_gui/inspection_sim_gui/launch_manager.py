@@ -7,6 +7,121 @@ from PyQt5.QtCore import QObject, QProcess, pyqtSignal
 from .config import DEFAULT_ROS_SETUP_PATH, DEFAULT_WORKSPACE_PATH
 
 
+def build_sim_command(
+    use_rviz=False,
+    headless=False,
+    world=None,
+    world_name=None,
+    spawn_x=0.0,
+    spawn_y=0.0,
+    spawn_z=0.05,
+    spawn_yaw=0.0,
+    dynamic_obstacles_config=None,
+    dynamic_obstacle_seed=None,
+):
+    command = (
+        "ros2 launch inspection_sim_bringup sim.launch.py "
+        f"use_rviz:={str(use_rviz).lower()} "
+        f"headless:={str(headless).lower()}"
+    )
+    if world is not None:
+        command += f" world:={shlex.quote(world)}"
+    if world_name is not None:
+        command += f" world_name:={shlex.quote(world_name)}"
+    command += (
+        f" spawn_x:={spawn_x} "
+        f"spawn_y:={spawn_y} "
+        f"spawn_z:={spawn_z} "
+        f"spawn_yaw:={spawn_yaw}"
+    )
+    if dynamic_obstacles_config is not None:
+        command += f" dynamic_obstacles_config:={shlex.quote(dynamic_obstacles_config)}"
+        if dynamic_obstacle_seed is not None:
+            command += f" dynamic_obstacle_seed:={dynamic_obstacle_seed}"
+    return command
+
+
+def build_mapping_command(
+    use_rviz=True,
+    headless=False,
+    world=None,
+    world_name=None,
+    spawn_x=0.0,
+    spawn_y=0.0,
+    spawn_z=0.05,
+    spawn_yaw=0.0,
+    dynamic_obstacles_config=None,
+    dynamic_obstacle_seed=None,
+):
+    command = (
+        "ros2 launch inspection_sim_bringup mapping.launch.py "
+        f"use_rviz:={str(use_rviz).lower()} "
+        f"headless:={str(headless).lower()}"
+    )
+    if world is not None:
+        command += f" world:={shlex.quote(world)}"
+    if world_name is not None:
+        command += f" world_name:={shlex.quote(world_name)}"
+    command += (
+        f" spawn_x:={spawn_x} "
+        f"spawn_y:={spawn_y} "
+        f"spawn_z:={spawn_z} "
+        f"spawn_yaw:={spawn_yaw}"
+    )
+    if dynamic_obstacles_config is not None:
+        command += f" dynamic_obstacles_config:={shlex.quote(dynamic_obstacles_config)}"
+        if dynamic_obstacle_seed is not None:
+            command += f" dynamic_obstacle_seed:={dynamic_obstacle_seed}"
+    return command
+
+
+def build_navigation_command(
+    map_path,
+    use_rviz=True,
+    headless=False,
+    world=None,
+    world_name=None,
+    spawn_x=0.0,
+    spawn_y=0.0,
+    spawn_z=0.05,
+    spawn_yaw=0.0,
+    initial_pose_x=0.0,
+    initial_pose_y=0.0,
+    initial_pose_yaw=0.0,
+    regions=None,
+    dynamic_obstacles_config=None,
+    dynamic_obstacle_seed=None,
+):
+    command = (
+        "ros2 launch inspection_sim_bringup navigation.launch.py "
+        f"map:={shlex.quote(map_path)} "
+        f"use_rviz:={str(use_rviz).lower()} "
+        f"headless:={str(headless).lower()}"
+    )
+    if world is not None:
+        command += f" world:={shlex.quote(world)}"
+    if world_name is not None:
+        command += f" world_name:={shlex.quote(world_name)}"
+    command += (
+        f" spawn_x:={spawn_x} "
+        f"spawn_y:={spawn_y} "
+        f"spawn_z:={spawn_z} "
+        f"spawn_yaw:={spawn_yaw}"
+    )
+    command += (
+        f" initial_pose_x:={initial_pose_x} "
+        f"initial_pose_y:={initial_pose_y} "
+        f"initial_pose_yaw:={initial_pose_yaw}"
+    )
+    if regions is not None:
+        command += f" regions:={shlex.quote(regions)}"
+    if dynamic_obstacles_config is not None:
+        command += f" dynamic_obstacles_config:={shlex.quote(dynamic_obstacles_config)}"
+        if dynamic_obstacle_seed is not None:
+            command += f" dynamic_obstacle_seed:={dynamic_obstacle_seed}"
+    return command
+
+
 class LaunchManager(QObject):
     log_line = pyqtSignal(str)
     state_changed = pyqtSignal(str)
@@ -33,21 +148,20 @@ class LaunchManager(QObject):
         spawn_y=0.0,
         spawn_z=0.05,
         spawn_yaw=0.0,
+        dynamic_obstacles_config=None,
+        dynamic_obstacle_seed=None,
     ):
-        command = (
-            "ros2 launch inspection_sim_bringup sim.launch.py "
-            f"use_rviz:={str(use_rviz).lower()} "
-            f"headless:={str(headless).lower()}"
-        )
-        if world is not None:
-            command += f" world:={shlex.quote(world)}"
-        if world_name is not None:
-            command += f" world_name:={shlex.quote(world_name)}"
-        command += (
-            f" spawn_x:={spawn_x} "
-            f"spawn_y:={spawn_y} "
-            f"spawn_z:={spawn_z} "
-            f"spawn_yaw:={spawn_yaw}"
+        command = build_sim_command(
+            use_rviz=use_rviz,
+            headless=headless,
+            world=world,
+            world_name=world_name,
+            spawn_x=spawn_x,
+            spawn_y=spawn_y,
+            spawn_z=spawn_z,
+            spawn_yaw=spawn_yaw,
+            dynamic_obstacles_config=dynamic_obstacles_config,
+            dynamic_obstacle_seed=dynamic_obstacle_seed,
         )
         return self.start("sim", command)
 
@@ -61,21 +175,20 @@ class LaunchManager(QObject):
         spawn_y=0.0,
         spawn_z=0.05,
         spawn_yaw=0.0,
+        dynamic_obstacles_config=None,
+        dynamic_obstacle_seed=None,
     ):
-        command = (
-            "ros2 launch inspection_sim_bringup mapping.launch.py "
-            f"use_rviz:={str(use_rviz).lower()} "
-            f"headless:={str(headless).lower()}"
-        )
-        if world is not None:
-            command += f" world:={shlex.quote(world)}"
-        if world_name is not None:
-            command += f" world_name:={shlex.quote(world_name)}"
-        command += (
-            f" spawn_x:={spawn_x} "
-            f"spawn_y:={spawn_y} "
-            f"spawn_z:={spawn_z} "
-            f"spawn_yaw:={spawn_yaw}"
+        command = build_mapping_command(
+            use_rviz=use_rviz,
+            headless=headless,
+            world=world,
+            world_name=world_name,
+            spawn_x=spawn_x,
+            spawn_y=spawn_y,
+            spawn_z=spawn_z,
+            spawn_yaw=spawn_yaw,
+            dynamic_obstacles_config=dynamic_obstacles_config,
+            dynamic_obstacle_seed=dynamic_obstacle_seed,
         )
         return self.start("mapping", command)
 
@@ -94,30 +207,26 @@ class LaunchManager(QObject):
         initial_pose_y=0.0,
         initial_pose_yaw=0.0,
         regions=None,
+        dynamic_obstacles_config=None,
+        dynamic_obstacle_seed=None,
     ):
-        command = (
-            "ros2 launch inspection_sim_bringup navigation.launch.py "
-            f"map:={shlex.quote(map_path)} "
-            f"use_rviz:={str(use_rviz).lower()} "
-            f"headless:={str(headless).lower()}"
+        command = build_navigation_command(
+            map_path=map_path,
+            use_rviz=use_rviz,
+            headless=headless,
+            world=world,
+            world_name=world_name,
+            spawn_x=spawn_x,
+            spawn_y=spawn_y,
+            spawn_z=spawn_z,
+            spawn_yaw=spawn_yaw,
+            initial_pose_x=initial_pose_x,
+            initial_pose_y=initial_pose_y,
+            initial_pose_yaw=initial_pose_yaw,
+            regions=regions,
+            dynamic_obstacles_config=dynamic_obstacles_config,
+            dynamic_obstacle_seed=dynamic_obstacle_seed,
         )
-        if world is not None:
-            command += f" world:={shlex.quote(world)}"
-        if world_name is not None:
-            command += f" world_name:={shlex.quote(world_name)}"
-        command += (
-            f" spawn_x:={spawn_x} "
-            f"spawn_y:={spawn_y} "
-            f"spawn_z:={spawn_z} "
-            f"spawn_yaw:={spawn_yaw}"
-        )
-        command += (
-            f" initial_pose_x:={initial_pose_x} "
-            f"initial_pose_y:={initial_pose_y} "
-            f"initial_pose_yaw:={initial_pose_yaw}"
-        )
-        if regions is not None:
-            command += f" regions:={shlex.quote(regions)}"
         return self.start("navigation", command)
 
     def save_map(self, map_path):

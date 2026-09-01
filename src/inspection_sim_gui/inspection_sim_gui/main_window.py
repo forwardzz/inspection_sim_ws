@@ -62,6 +62,55 @@ def load_scene_catalog(path):
     return scenes
 
 
+NO_MAP_HINT = "暂无推荐地图，可启动仿真或建图"
+NAVIGATION_BLOCKED_TITLE = "暂无推荐地图"
+NAVIGATION_BLOCKED_MESSAGE = (
+    "当前场景暂无推荐地图，可启动仿真或建图。"
+    "请勿使用其他场景的地图启动导航。"
+)
+
+
+def scene_navigation_blocked(scene):
+    return bool(scene) and scene.get("navigation_enabled") is False
+
+
+def scene_map_dir(scene):
+    if not scene:
+        return ""
+    return str(scene.get("map_dir", "") or "")
+
+
+def scene_maps_root(workspace_path, scene):
+    base = os.path.join(workspace_path or DEFAULT_WORKSPACE_PATH, "maps")
+    folder = scene_map_dir(scene)
+    if folder:
+        base = os.path.join(base, folder)
+    return base
+
+
+def scene_recommended_map_path(workspace_path, scene):
+    if not scene or not scene.get("map"):
+        return None
+    return os.path.join(scene_maps_root(workspace_path, scene), scene["map"])
+
+
+def scene_default_map_path(workspace_path, scene):
+    folder_name = scene_map_dir(scene) or "inspection"
+    return os.path.join(scene_maps_root(workspace_path, scene), f"{folder_name}.yaml")
+
+
+def list_scene_maps(workspace_path, scene):
+    return sorted(glob(os.path.join(scene_maps_root(workspace_path, scene), "*.yaml")))
+
+
+def normalize_scene_map_path(path, workspace_path, scene):
+    if not path:
+        return scene_default_map_path(workspace_path, scene)
+    if os.path.basename(path) == path:
+        return os.path.join(scene_maps_root(workspace_path, scene), path)
+    return path
+
+
 class GuiSignals(QObject):
     log = pyqtSignal(str)
     nav_feedback = pyqtSignal(str)
@@ -637,6 +686,8 @@ class MainWindow(QMainWindow):
             spawn_y=spawn_y,
             spawn_z=spawn_z,
             spawn_yaw=spawn_yaw,
+            dynamic_obstacles_config=self._scene_dynamic_obstacles_path(scene),
+            dynamic_obstacle_seed=self._scene_dynamic_obstacle_seed(scene),
         )
 
     def start_mapping(self):
@@ -657,21 +708,24 @@ class MainWindow(QMainWindow):
             spawn_y=spawn_y,
             spawn_z=spawn_z,
             spawn_yaw=spawn_yaw,
+            dynamic_obstacles_config=self._scene_dynamic_obstacles_path(scene),
+            dynamic_obstacle_seed=self._scene_dynamic_obstacle_seed(scene),
         )
 
     def start_navigation(self):
         self._apply_launch_paths()
+        scene = self._current_scene()
+        if scene_navigation_blocked(scene):
+            QMessageBox.warning(
+                self, NAVIGATION_BLOCKED_TITLE, NAVIGATION_BLOCKED_MESSAGE
+            )
+            return
         map_path = self._normalize_map_path(self._map_text())
         if not map_path:
             QMessageBox.warning(self, "缺少地图路径", "启动导航前需要设置地图 YAML。")
             return
-        scene = self._current_scene()
         if scene:
-            recommended_map = os.path.join(
-                self.workspace_edit.text().strip() or DEFAULT_WORKSPACE_PATH,
-                "maps",
-                scene.get("map", ""),
-            )
+            recommended_map = scene_recommended_map_path(self._workspace(), scene)
             if recommended_map and self._normalize_map_path(map_path) != recommended_map:
                 reply = QMessageBox.question(
                     self,
@@ -708,6 +762,8 @@ class MainWindow(QMainWindow):
             initial_pose_y=init_y,
             initial_pose_yaw=init_yaw,
             regions=regions_path,
+            dynamic_obstacles_config=self._scene_dynamic_obstacles_path(scene),
+            dynamic_obstacle_seed=self._scene_dynamic_obstacle_seed(scene),
         )
 
     def save_map(self):
@@ -717,23 +773,18 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "缺少地图路径", "请先设置输出地图 YAML 路径。")
             return
         scene = self._current_scene()
-        if scene:
-            recommended_map = os.path.join(
-                self.workspace_edit.text().strip() or DEFAULT_WORKSPACE_PATH,
-                "maps",
-                scene.get("map", ""),
+        recommended_map = scene_recommended_map_path(self._workspace(), scene)
+        if recommended_map and self._normalize_map_path(map_path) != recommended_map:
+            reply = QMessageBox.question(
+                self,
+                "地图路径不匹配",
+                f"保存路径 ({os.path.basename(map_path)}) 与当前场景推荐地图 "
+                f"({scene.get('map')}) 不一致。\n\n是否继续保存？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
             )
-            if recommended_map and self._normalize_map_path(map_path) != recommended_map:
-                reply = QMessageBox.question(
-                    self,
-                    "地图路径不匹配",
-                    f"保存路径 ({os.path.basename(map_path)}) 与当前场景推荐地图 "
-                    f"({scene.get('map')}) 不一致。\n\n是否继续保存？",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No,
-                )
-                if reply != QMessageBox.Yes:
-                    return
+            if reply != QMessageBox.Yes:
+                return
         self._set_map_text(map_path)
         self.launch_manager.save_map(map_path)
 
@@ -958,9 +1009,12 @@ class MainWindow(QMainWindow):
     def append_log(self, line):
         if not line:
             return
-        self.log_view.appendPlainText(line)
-        bar = self.log_view.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        if hasattr(self, "log_view"):
+            self.log_view.appendPlainText(line)
+            bar = self.log_view.verticalScrollBar()
+            bar.setValue(bar.maximum())
+        else:
+            self._startup_log_messages.append(line)
 
     def _nav_result(self, line):
         self.append_log(line)
@@ -1126,24 +1180,51 @@ class MainWindow(QMainWindow):
             self.ros_setup_edit.setText(path)
 
     def _browse_map(self):
-        start = os.path.dirname(self._map_text()) or os.path.join(self.workspace_edit.text(), "maps")
+        start = os.path.dirname(self._map_text()) or scene_maps_root(
+            self._workspace(), self._current_scene()
+        )
         path, _ = QFileDialog.getOpenFileName(self, "地图 YAML", start, "YAML files (*.yaml *.yml)")
         if path:
             self._set_map_text(path)
 
     def refresh_maps(self):
         self._apply_launch_paths()
+        self._refresh_map_combo_for_scene()
+
+    def _refresh_map_combo_for_scene(self):
+        workspace = self._workspace()
+        scene = self._current_scene()
+        maps = list_scene_maps(workspace, scene)
+        recommended = scene_recommended_map_path(workspace, scene)
         current = self._map_text()
-        maps_dir = os.path.join(self.workspace_edit.text().strip() or DEFAULT_WORKSPACE_PATH, "maps")
-        maps = sorted(glob(os.path.join(maps_dir, "*.yaml")))
-        self.map_combo.clear()
-        for path in maps or [current or self._normalize_map_path("")]:
-            self.map_combo.addItem(path)
-        if current and current in maps:
-            self._set_map_text(current)
+        selected = None
+        if current in maps:
+            selected = current
+        elif recommended and os.path.isfile(recommended):
+            selected = recommended
         elif maps:
-            self._set_map_text(maps[0])
-        self.append_log(f"[MAP] {maps_dir} found {len(maps)} map yaml file(s)")
+            selected = maps[0]
+        if selected is None:
+            selected = scene_default_map_path(workspace, scene)
+        items = maps or [selected]
+        self.map_combo.blockSignals(True)
+        self.map_combo.clear()
+        for path in items:
+            self.map_combo.addItem(path)
+        if self.map_combo.findText(selected) < 0:
+            self.map_combo.addItem(selected)
+        self.map_combo.setCurrentIndex(self.map_combo.findText(selected))
+        self.map_combo.blockSignals(False)
+        self.append_log(f"[MAP] {scene_maps_root(workspace, scene)} found {len(maps)} map yaml file(s)")
+        if scene_navigation_blocked(scene) or not scene.get("map"):
+            self.append_log(f"[SCENE] {NO_MAP_HINT}")
+        elif recommended and not os.path.isfile(recommended):
+            self.append_log(
+                f"[SCENE] 推荐地图不存在: {recommended}. 建议通过建图生成并保存."
+            )
+
+    def _workspace(self):
+        return self.workspace_edit.text().strip() or DEFAULT_WORKSPACE_PATH
 
     def _map_text(self):
         return self.map_combo.currentText().strip()
@@ -1156,12 +1237,7 @@ class MainWindow(QMainWindow):
         self.map_combo.setCurrentIndex(index)
 
     def _normalize_map_path(self, path):
-        maps_dir = os.path.join(self.workspace_edit.text().strip() or DEFAULT_WORKSPACE_PATH, "maps")
-        if not path:
-            return os.path.join(maps_dir, "inspection_map.yaml")
-        if os.path.basename(path) == path:
-            return os.path.join(maps_dir, path)
-        return path
+        return normalize_scene_map_path(path, self._workspace(), self._current_scene())
 
     def _find_bringup_share(self):
         try:
@@ -1221,19 +1297,7 @@ class MainWindow(QMainWindow):
         self.init_y_spin.setValue(float(scene.get("initial_pose_y", 0.0)))
         self.init_yaw_spin.setValue(float(scene.get("initial_pose_yaw", 0.0)))
         self.settings.setValue("current_scene", scene["name"])
-        recommended_map = os.path.join(
-            self.workspace_edit.text().strip() or DEFAULT_WORKSPACE_PATH,
-            "maps",
-            scene.get("map", ""),
-        )
-        if recommended_map and os.path.isfile(recommended_map):
-            current = self._map_text()
-            if self._normalize_map_path(current) != recommended_map:
-                self._set_map_text(recommended_map)
-        else:
-            self.append_log(
-                f"[SCENE] 推荐地图不存在: {recommended_map}. 建议通过建图生成并保存."
-            )
+        self._refresh_map_combo_for_scene()
 
     def _scene_world_path(self, scene):
         if not self.bringup_share or not scene:
@@ -1241,8 +1305,24 @@ class MainWindow(QMainWindow):
         return os.path.join(self.bringup_share, "worlds", scene.get("world", ""))
 
     def _scene_regions_path(self, scene):
-        workspace = self.workspace_edit.text().strip() or DEFAULT_WORKSPACE_PATH
-        return os.path.join(workspace, "maps", scene.get("regions", ""))
+        if not scene or not scene.get("regions"):
+            return None
+        return os.path.join(scene_maps_root(self._workspace(), scene), scene["regions"])
+
+    def _scene_dynamic_obstacles_path(self, scene):
+        if not self.bringup_share or not scene or not scene.get("dynamic_obstacles_config"):
+            return None
+        return os.path.join(
+            self.bringup_share, "config", scene["dynamic_obstacles_config"]
+        )
+
+    def _scene_dynamic_obstacle_seed(self, scene):
+        if not scene or "dynamic_obstacle_seed" not in scene:
+            return None
+        try:
+            return int(scene.get("dynamic_obstacle_seed"))
+        except (TypeError, ValueError):
+            return None
 
     def closeEvent(self, event):
         self.settings.sync()
